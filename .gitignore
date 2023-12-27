@@ -4,3 +4,4 @@ test.resp
 main_*.rs
 config.toml
 cache/
+src/test.py
