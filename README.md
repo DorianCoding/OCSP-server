@@ -105,4 +105,4 @@ OCSP Response Data:
          98:31:2e:7c
 ```
 ### Licence
-* AGPL 3.0
+* GPL 3.0
