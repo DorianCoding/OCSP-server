@@ -2,8 +2,8 @@
 
 OCSP Server is the Rust implementation of the [python version](https://github.com/DorianCoding/OCSP_MySql).
 
-[![License](https://img.shields.io/badge/license-Apache%202-4EB1BA.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
-[![Github stars](https://img.shields.io/github/stars/DorianCoding/OCSP_MySql.svg)](https://github.com/DorianCoding/OCSP_server/stargazers)
+![GitHub License](https://img.shields.io/github/license/DorianCoding/OCSP_server)
+[![Github stars](https://img.shields.io/github/stars/DorianCoding/OCSP_server.svg)](https://github.com/DorianCoding/OCSP_server/stargazers)
 # OCSP server connected to MySql Database
 This software implements a OCSP responder in Rust, fetching certificate status in a Mysql Database. Unlike the Python implementation, it **does implement its own TCP listener** on port 9000.
 ## Requirements
