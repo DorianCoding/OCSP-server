@@ -33,6 +33,7 @@ const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 #[derive(Debug)]
 struct Config {
     issuer_hash: Vec<u8>,
+    #[allow(dead_code)]
     issuer_name_hash: u32,
     rsakey: pkey::PKey<pkey::Private>,
     cachedays: u16,
@@ -54,7 +55,9 @@ struct Fileconfig {
     itkey: String,
     itcert: String
 }
+#[allow(unsafe_code)]
 unsafe impl Send for Config {}
+#[allow(unsafe_code)]
 unsafe impl Sync for Config {}
 #[post("/<_..>", data = "<data>")]
 async fn upload2<'a>(config: &State<Config>, data: Data<'a>) -> io::Result<(ContentType, Vec<u8>)> {

@@ -1,8 +1,13 @@
 [package]
 name = "ocsp-server"
+authors = ["DorianCoding"]
+description = "OCSP server, listening for requests to give responses."
 version = "0.1.0"
 edition = "2021"
-
+license = "GPL-3.0-only"
+repository = "https://github.com/DorianCoding/OCSP_server"
+keywords = ["ocsp", "server", "ocsp-response"]
+categories = []
 [dependencies]
 chrono = "0.4.31"
 config-file = "0.2.3"
@@ -13,3 +18,7 @@ openssl = "0.10.62"
 rocket = "0.5.0"
 serde = "1.0.193"
 zeroize = { version = "1.7.0", features = ["std", "zeroize_derive"] }
+[lints.rust]
+unsafe_code = "warn"
+[badges]
+maintenance = {status = "passively-maintained" }
