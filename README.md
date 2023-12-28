@@ -23,6 +23,7 @@ The config file should contain the following informations :
 cachedays = 3 #Number of days a response is valid
 dbip = "127.0.0.1" #IP to connect to MySql database
 dbuser = "cert" #Username to connect to MySql database
+port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
@@ -31,43 +32,17 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 ```
 ## How to implement?
+### As a linux service
+
+Create your config file in the main directory and call `service.sh` as root. The service then will be started on bootup and will listen to connections.
 ### Binaries
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
 2) Extract binaries for your architecture and execute it in the background.
-## Compile from source
+### Compile from source
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
 2) Type `cargo run` and enjoy 👍
-
-### As a linux service
-
-Type as root :
-
-```bash
-systemctl --force --full edit ocspserver.service
-```
-
-Type the following code :
-
-```bash
-# /etc/systemd/system/ocspserver.service
-[Unit]
-Description=OCSP Server
-Requires=network.target
-After=network.target
-StartLimitIntervalSec=3m
-StartLimitBurst=10
-[Service]
-Type=simple
-RemainAfterExit=no
-ExecStart=/var/www/ocsp/ocspserver
-WorkingDirectory=/var/www/ocsp/
-RestartSec=2
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-```
-Copy the binary to /var/www/ocsp/ocspserver and the config file to /var/www/ocsp and start service : ```systemctl enable ocspserver && systemctl start ocspserver```.
-
+## Connections
+If your port 9000 is blocked or you need to use web-listening app, you can proxy to the script. Apache & Nginx can be used.
 ## MySql tables
 This script requires a table like this :
 ```

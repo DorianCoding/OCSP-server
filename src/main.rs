@@ -26,6 +26,7 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::process::{exit, ExitCode};
 use std::time::Duration;
 use zeroize::Zeroize;
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
@@ -46,6 +47,7 @@ struct Config {
 struct Fileconfig {
     cachedays: u16,
     dbip: String,
+    port: u32,
     dbuser: String,
     dbpassword: String,
     dbname: String,
@@ -351,6 +353,7 @@ fn rocket() -> _ {
     let mut key = fs::read_to_string(config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
     key.zeroize();
+    let port: u8 = u8::try_from(config.port).unwrap();
     let config = Config {
         issuer_hash,
         issuer_name_hash,
@@ -367,7 +370,7 @@ fn rocket() -> _ {
         fs::create_dir_all(path).unwrap();
     }
     rocket::build()
-        .configure(rocket::Config::figment().merge(("port", 9000)))
+        .configure(rocket::Config::figment().merge(("port", port)))
         .mount("/", routes![upload])
         .mount("/", routes![upload2])
         .manage(config)
