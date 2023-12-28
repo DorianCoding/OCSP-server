@@ -8,6 +8,7 @@ OCSP Server is the Rust implementation of the [python version](https://github.co
 This software implements a OCSP responder in Rust, fetching certificate status in a Mysql Database. Unlike the Python implementation, it **does implement its own TCP listener** on port 9000.
 ## Requirements
 - A CA certificate (self-signed allowed) and an intermediate CA that will sign leaf certificates.
+- A config file (config.toml) in the same directory.
 - A Mysql database containing all certificates (check below)
 ## What is done
 - Extract OCSP requests, verify it is a signed certificate by the CA, check in the database if it is good or revoked and sign the response. It also caches answers for the duration of the signed response.
@@ -15,6 +16,20 @@ This software implements a OCSP responder in Rust, fetching certificate status i
 ## What is not done
 - Only leaf certificates will be signed as valid, not the intermediate one.
 - Security over the TCP socket
+## Config file
+The config file should contain the following informations :
+```toml
+#Config file, all fields are compulsory
+cachedays = 3 #Number of days a response is valid
+dbip = "127.0.0.1" #IP to connect to MySql database
+dbuser = "cert" #Username to connect to MySql database
+dbname = "certs" #Name to connect to MySql data
+dbpassword = "certdata" #Password to connect to cert data
+cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
+itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate
+itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret
+
+```
 ## How to implement?
 ### Binaries
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
@@ -22,6 +37,37 @@ This software implements a OCSP responder in Rust, fetching certificate status i
 ## Compile from source
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
 2) Type `cargo run` and enjoy 👍
+
+### As a linux service
+
+Type as root :
+
+```bash
+systemctl --force --full edit ocspserver.service
+```
+
+Type the following code :
+
+```bash
+# /etc/systemd/system/ocspserver.service
+[Unit]
+Description=OCSP Server
+Requires=network.target
+After=network.target
+StartLimitIntervalSec=3m
+StartLimitBurst=10
+[Service]
+Type=simple
+RemainAfterExit=no
+ExecStart=/var/www/ocsp/ocspserver
+WorkingDirectory=/var/www/ocsp/
+RestartSec=2
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+```
+Copy the binary to /var/www/ocsp/ocspserver and the config file to /var/www/ocsp and start service : ```systemctl enable ocspserver && systemctl start ocspserver```.
+
 ## MySql tables
 This script requires a table like this :
 ```

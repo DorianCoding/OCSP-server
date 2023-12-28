@@ -1,7 +1,7 @@
 /target
 *_files/
 test.resp
-main_*.rs
+src/main_*.rs
 config.toml
 cache/
 src/test.py

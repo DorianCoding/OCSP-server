@@ -55,7 +55,7 @@ struct Fileconfig {
 }
 unsafe impl Send for Config {}
 unsafe impl Sync for Config {}
-#[post("/", data = "<data>")]
+#[post("/<_..>", data = "<data>")]
 async fn upload2<'a>(config: &State<Config>, data: Data<'a>) -> io::Result<(ContentType, Vec<u8>)> {
     upload(config, data).await
 }
@@ -235,7 +235,7 @@ fn addtocache(state: &State<Config>, certnum: &str, maxdate: DateTime<FixedOffse
     let path = Path::new(&long);
     fs::write(path, response)
 }
-#[get("/", data = "<data>")]
+#[get("/<_..>", data = "<data>")]
 async fn upload<'a>(state: &State<Config>, data: Data<'a>) -> io::Result<(ContentType, Vec<u8>)> {
     let custom = ContentType::new("application", "ocsp-response");
     let stream = data.open(3.mebibytes());
@@ -345,7 +345,6 @@ fn getprivatekey(data: &str) -> Result<pkey::PKey<pkey::Private>, openssl::error
 fn rocket() -> _ {
     let config = Fileconfig::from_config_file("config.toml").unwrap();
     let file = fs::read_to_string(config.itcert).unwrap();
-    println!("File is {}",file);
     let certpem = x509::X509::from_pem(file.as_bytes()).unwrap();
     let issuer_hash = certpem.subject_key_id().unwrap().as_slice().to_vec();
     let issuer_name_hash = certpem.subject_name_hash();
