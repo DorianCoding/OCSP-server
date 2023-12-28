@@ -5,10 +5,10 @@ OCSP Server is the Rust implementation of the [python version](https://github.co
 ![GitHub License](https://img.shields.io/github/license/DorianCoding/OCSP_server)
 [![Github stars](https://img.shields.io/github/stars/DorianCoding/OCSP_server.svg)](https://github.com/DorianCoding/OCSP_server/stargazers)
 # OCSP server connected to MySql Database
-This software implements a OCSP responder in Rust, fetching certificate status in a Mysql Database. Unlike the Python implementation, it **does implement its own TCP listener** on port 9000.
+This software implements a OCSP responder in Rust, fetching certificate status in a Mysql Database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port.
 ## Requirements
 - A CA certificate (self-signed allowed) and an intermediate CA that will sign leaf certificates.
-- A config file (config.toml) in the same directory.
+- A config file (config.toml) in the same directory. As well, files indicated in this file must also be accessible.
 - A Mysql database containing all certificates (check below)
 ## What is done
 - Extract OCSP requests, verify it is a signed certificate by the CA, check in the database if it is good or revoked and sign the response. It also caches answers for the duration of the signed response.
@@ -16,6 +16,10 @@ This software implements a OCSP responder in Rust, fetching certificate status i
 ## What is not done
 - Only leaf certificates will be signed as valid, not the intermediate one.
 - Security over the TCP socket
+
+> [!TIP]
+> The intermediate certificate should be signed by CA in an OCSP response that is stored separately. The CA certificate and private key should be stored offline.
+
 ## Config file
 The config file should contain the following informations :
 ```toml
@@ -29,8 +33,14 @@ dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
 itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate
 itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret
-
 ```
+
+> [!CAUTION]
+> Config.toml should be read-only for the script and inaccessible for others because it contains dbpassword.
+> Intermediate certificate key should be held secret, must be read-only for the script and inaccessible to anyone else.
+> As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection.
+
+
 ## How to implement?
 ### As a linux service
 
@@ -41,8 +51,8 @@ Create your config file in the main directory and call `service.sh` as root. The
 ### Compile from source
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
 2) Type `cargo run` and enjoy 👍
-## Connections
-If your port 9000 is blocked or you need to use web-listening app, you can proxy to the script. Apache & Nginx can be used.
+## TCP listener and firewall
+If your port selected is blocked by the firewall or you need to use web-listening app, you can proxy to the script. Apache & Nginx can be used.
 ## MySql tables
 This script requires a table like this :
 ```
@@ -56,7 +66,8 @@ CREATE TABLE `list_certs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ```
 - The certificate number **must be unique** and stars with 0x (like a hex number). Cert must contain the certificate.
-## Input
+## Script in/out
+### Input
 This software requires an OCSP request in binary form from the socket client. A request look like this (**in base64 format**), the binary form (DER format) is not human-readable but is the one needed :
 ```
 MHoweDBRME8wTTAJBgUrDgMCGgUABBRGf2x685RgF9qF4azpunF6LM75OQQUwX3C7a+au9Af8tx/
@@ -77,7 +88,7 @@ OCSP Request Data:
         OCSP Nonce:
             041091C0DC0D908FCC6479EC23429EDE9E2A
 ```
-## Output
+### Output
 The software will give a binary file which is the OCSP response in DER format, just as before, the base64 form :
 ```
 MIIB1woBAKCCAdAwggHMBgkrBgEFBQcwAQEEggG9MIIBuTCBoqIWBBTBfcLtr5q70B/y3H+1x8LE
