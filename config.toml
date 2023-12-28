@@ -1,0 +1,10 @@
+#Config file, all fields are compulsory
+cachedays = 3
+dbip = "127.0.0.1"
+dbuser = "cert"
+port = 9000
+dbname = "certs"
+dbpassword = "cert"
+cachefolder = "cache/"
+itcert = "/var/public_files/it_cert.crt"
+itkey = "/var/private_files/it_privkey.pem"
