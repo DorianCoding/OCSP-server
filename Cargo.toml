@@ -7,7 +7,12 @@ edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/DorianCoding/OCSP_server"
 keywords = ["ocsp", "server", "ocsp-response"]
-categories = []
+categories = ["caching", "cryptography"]
+exclude = [
+    "binaries/*",
+    "config.toml",
+    "service.sh",
+]
 [dependencies]
 chrono = "0.4.31"
 config-file = "0.2.3"
