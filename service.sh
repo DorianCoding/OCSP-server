@@ -12,14 +12,21 @@ if [ $? -ne 0 ]
   then echo "Error while creating the user, exiting"
   exit
 fi
-echo "Creating configuration file"
+echo -n "Cancel the script now if you did not edit config.toml and change it now, else the script won't work"
+read -t 10
+echo "Creating cache directory"
 mkdir -p /var/ocsp/cache
 if [ $? -ne 0 ]
-  then echo "Error adding var/ocsp/ folder, exiting"
+  then echo "Error adding var/ocsp/cache folder, exiting"
   exit
 fi
 echo "Creating binaries"
-cp binaries/linux-x86_64_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
+if [ `getconf LONG_BIT` = "64" ]
+then
+  cp binaries/linux-x86_64_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
+else
+  cp binaries/linux-x32_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
+fi
 if [ $? -ne 0 ]
   then echo "Error copying files, exiting"
   exit
@@ -62,7 +69,7 @@ if [ $? -ne 0 ]
   then echo "Error setting services, exiting."
   exit
 fi
-systemctl daemon-reload && systemctl ocspserver enable && sudo service ocspserver start
+systemctl daemon-reload && systemctl enable ocspserver && systemctl start ocspserver
 if [ $? -ne 0 ]
   then echo "Error start services, exiting."
   exit

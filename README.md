@@ -1,21 +1,25 @@
-#  OCSP Server
-
-OCSP Server is the Rust implementation of the [python version](https://github.com/DorianCoding/OCSP_MySql).
-
+# OCSP server
 ![GitHub License](https://img.shields.io/github/license/DorianCoding/OCSP_server)
 [![Github stars](https://img.shields.io/github/stars/DorianCoding/OCSP_server.svg)](https://github.com/DorianCoding/OCSP_server/stargazers)
-# OCSP server connected to MySql Database
-This software implements a OCSP responder in Rust, fetching certificate status in a Mysql Database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port.
+<img alt="French flag" src="https://github.com/lipis/flag-icons/blob/main/flags/1x1/fr.svg" width="25">
+
+*OCSP Server is a **OCSP responder**, the Rust implementation of the [python version](https://github.com/DorianCoding/OCSP_MySql).*
+
+----
+
+This software implements a OCSP responder in Rust, fetching certificate status in a Mysql/MariaDB database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port. 
+*It will answer to any **GET or POST** requests on any URL*.
 ## Requirements
-- A CA certificate (self-signed allowed) and an intermediate CA that will sign leaf certificates.
+- A CA certificate (self-signed allowed) and/or an intermediate CA that will sign leaf certificates.
 - A config file (config.toml) in the same directory. As well, files indicated in this file must also be accessible.
-- A Mysql database containing all certificates (check below)
+- A Mysql database containing all certificates (check below) that could be checked and were signed.
+
 ## What is done
-- Extract OCSP requests, verify it is a signed certificate by the CA, check in the database if it is good or revoked and sign the response. It also caches answers for the duration of the signed response.
+- Extract OCSP requests, verify it is a signed certificate by the CA, check in the database if it is good or revoked and sign the response. It also caches answers for some days to avoid RSA calculations.
 - Create a specific user for this task to ensure protection for intermediate certificate, as the private key is required.
 ## What is not done
 - Only leaf certificates will be signed as valid, not the intermediate one.
-- Security over the TCP socket
+- No control is performed on the TCP socket and it should not be open to public as it but rather behind a reverse proxy that controls the flow, such as Apache or Nginx. Requests are limited to 3 Mb.
 
 > [!TIP]
 > The intermediate certificate should be signed by CA in an OCSP response that is stored separately. The CA certificate and private key should be stored offline.
@@ -24,10 +28,10 @@ This software implements a OCSP responder in Rust, fetching certificate status i
 The config file should contain the following informations :
 ```toml
 #Config file, all fields are compulsory
-cachedays = 3 #Number of days a response is valid
+cachedays = 3 #Number of days a response is valid once created (only for valid certificates)
 dbip = "127.0.0.1" #IP to connect to MySql database
 dbuser = "cert" #Username to connect to MySql database
-port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service
+port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service)
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
@@ -37,24 +41,25 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 > [!CAUTION]
 > Config.toml should be read-only for the script and inaccessible for others because it contains dbpassword.
-> Intermediate certificate key should be held secret, must be read-only for the script and inaccessible to anyone else.
-> As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection.
+> Intermediate certificate key should be held secret, must be read-only for the script and inaccessible to anyone else. The intermediate certificate should be world-readonly, including to the script.
+> As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection. All the filesystem is locked by systemd except the cache folder.
+> The responder will reply to any certificate that are present in the database, whatever they are currently expired or not.
 
 
 ## How to implement?
-### As a linux service
+### As a linux service (Recommended)
 
 Create your config file in the main directory and call `service.sh` as root. The service then will be started on bootup and will listen to connections.
 ### Binaries
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
 2) Extract binaries for your architecture and execute it in the background.
+
+*Feel free to share binaries for others architectures in a PR so they can be added. Please post only optimized binaries (release).*
 ### Compile from source
 1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
-2) Type `cargo run` and enjoy 👍
-## TCP listener and firewall
-If your port selected is blocked by the firewall or you need to use web-listening app, you can proxy to the script. Apache & Nginx can be used.
-## MySql tables
-This script requires a table like this :
+2) Type `cargo run` or `cargo run --release` and enjoy 👍
+## MySql table
+This script requires a table with this kind of structure :
 ```
 CREATE TABLE `list_certs` (
   `cert_num` varchar(50) NOT NULL,
@@ -65,8 +70,25 @@ CREATE TABLE `list_certs` (
   PRIMARY KEY (`cert_num`),
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ```
-- The certificate number **must be unique** and stars with 0x (like a hex number). Cert must contain the certificate.
-## Script in/out
+- The certificate number **must be unique** and start with 0x (like a hex number). Cert must contain the certificate in PEM format. Revocaition_time must be in UTC timezone.
+- When the certificate is valid, status must be "Valid" and revocation_time and reason must be NULL. On the opposite, upon revocation, status must be "Revoked" and revocation_time and reason must be set.
+## Script test and timeline
+### Test integration
+You can test the script using `openssl` and replacing issuer and cert by files containing respectively the issuer and the local certificate :
+```bash
+openssl ocsp -issuer myissuer.crt -cert localcert.crt -url http://localhost:9000 -resp_text
+```
+You should get a valid OCSP response. If you don't, check integration.
+### Timeline
+The script is fast and can be used in production systems. Here is the time taken using a 2048-bit RSA key as signing key :
+
+| Architecture | CPU | RAM | Time to perform [test](#Test) |
+| --- | --- | --- | --- |
+| armv7l 32-bit | Raspberry<sup>TM</sup> | 1 Go | 0,4s from scratch and 0,12s from cache |
+| x86_64 | Intel-i5 6<sup>th</sup> generation | 16 Go | 0,2s from scratch and 0,04s from cache |
+## Script input/output
+<details><summary>Toggle</summary>
+
 ### Input
 This software requires an OCSP request in binary form from the socket client. A request look like this (**in base64 format**), the binary form (DER format) is not human-readable but is the one needed :
 ```
@@ -136,5 +158,23 @@ OCSP Response Data:
          6e:54:1a:26:f2:ee:e6:d7:35:4c:92:ca:b5:83:f9:b9:4a:d1:
          98:31:2e:7c
 ```
-### Licence
+
+</details>
+
+## License
 * GPL 3.0
+
+> OCSP Server - OCSP responder in Rust
+> Copyright (C) 2023 DorianCoding
+> 
+> This program is free software: you can redistribute it and/or modify
+> it under the terms of the GNU General Public License as published by
+> the Free Software Foundation, under version 3 of the License only.
+> 
+> This program is distributed in the hope that it will be useful,
+> but WITHOUT ANY WARRANTY; without even the implied warranty of
+> MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+> GNU General Public License for more details.
+> 
+> You should have received a copy of the GNU General Public License
+> along with this program.  If not, see <https://www.gnu.org/licenses/>.
