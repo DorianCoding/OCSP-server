@@ -25,6 +25,8 @@ serde = "1.0.193"
 zeroize = { version = "1.7.0", features = ["std", "zeroize_derive"] }
 [profile.dev.package.openssl-sys]
 opt-level=3
+[profile.release]
+strip = "symbols"
 [lints.rust]
 unsafe_code = "warn"
 [badges]

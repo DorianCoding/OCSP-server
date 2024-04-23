@@ -1,25 +1,8 @@
-/*
-OCSP Server - OCSP responder in Rust
-Copyright (C) 2023 DorianCoding
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, under version 3 of the License only.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
 #[macro_use]
 extern crate rocket;
 use chrono::{self, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime};
 use config_file::FromConfigFile;
-use serde::Deserialize;
 use hex;
 use mysql::prelude::Queryable;
 use mysql::*;
@@ -38,9 +21,11 @@ use openssl::{hash, pkey, sign, x509};
 use rocket::http::ContentType;
 use rocket::State;
 use rocket::{data::ToByteUnit, Data};
+use serde::Deserialize;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroize;
@@ -49,8 +34,7 @@ const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 #[derive(Debug)]
 struct Config {
     issuer_hash: Vec<u8>,
-    #[allow(dead_code)]
-    issuer_name_hash: u32,
+    //issuer_name_hash: u32,
     rsakey: pkey::PKey<pkey::Private>,
     cachedays: u16,
     dbip: String,
@@ -69,14 +53,26 @@ struct Fileconfig {
     dbname: String,
     cachefolder: String,
     itkey: String,
-    itcert: String
+    itcert: String,
 }
-#[derive(Debug, PartialEq, Clone)]
-struct Certinfo {
-    status: String,
-    revocation_time: Option<mysql::Value>,
-    revocation_reason: Option<String>,
-    cert: String,
+#[test]
+fn testresponse() {
+    use std::time::Instant;
+    println!("Generating RSA key, may take a while...");
+    let private_key = openssl::rsa::Rsa::generate(2048).unwrap();
+    println!("Done.");
+    let private_key = openssl::pkey::PKey::from_rsa(private_key).unwrap();
+    let mut tosign: Vec<u8> = Vec::with_capacity(3000);
+    println!("Generating random");
+    let _ = openssl::rand::rand_priv_bytes(&mut tosign).unwrap();
+    println!("Done!");
+    let time = Instant::now();
+    for _ in 0..100 {
+        let mut signer = sign::Signer::new(hash::MessageDigest::sha256(), &private_key).unwrap();
+        signer.update(&tosign).unwrap();
+        let _ = signer.sign_to_vec().unwrap();
+    }
+    println!("Elapsed time : {:.6} ms", time.elapsed().as_millis());
 }
 fn signresponse(
     issuer_hash: &[u8],
@@ -107,12 +103,19 @@ fn signnonvalidresponse(motif: OcspRespStatus) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_non_success(motif)?;
     ocsp.to_der()
 }
+#[derive(Debug, PartialEq, Clone)]
+struct Certinfo {
+    status: String,
+    revocation_time: Option<mysql::Value>,
+    revocation_reason: Option<String>,
+    cert: String,
+}
 fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, mysql::Error> {
     // Let's select payments from database. Type inference should do the trick here.
     let opts = OptsBuilder::new()
         .user(Some(config.dbuser.as_str()))
-        //        .prefer_socket(true)
-        //        .socket(Some("/run/mysqld/mysqld.sock"))
+        .prefer_socket(true)
+        .socket(Some("/run/mysqld/mysqld.sock"))
         .ip_or_hostname(Some(config.dbip.as_str()))
         .read_timeout(Some(Duration::new(5, 0)))
         .db_name(Some(config.dbname.as_str()))
@@ -188,7 +191,9 @@ fn createocspresponse(
     let mut nextupdate = nextupdate;
     if preparedate.is_some() {
         let now = chrono::offset::Utc::now();
-        let elem = now.checked_add_days(chrono::Days::new(u64::from(preparedate.unwrap()))).unwrap_or(now);
+        let elem = now
+            .checked_add_days(chrono::Days::new(u64::from(preparedate.unwrap())))
+            .unwrap_or(now);
         let new = GeneralizedTime::new(
             elem.year(),
             elem.month(),
@@ -240,9 +245,8 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
             } else {
                 let _ = match fs::remove_file(path) {
                     Ok(_) => (),
-                    Err(e) =>  {
-                    warn!("Cannot remove file from cache: {}",e.to_string());
-                    ()
+                    Err(e) => {
+                        warn!("Cannot remove file because {}", e)
                     }
                 };
             }
@@ -250,17 +254,35 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
     }
     Ok(None)
 }
-fn addtocache(state: &State<Config>, certnum: &str, maxdate: DateTime<FixedOffset>, response: &[u8]) -> io::Result<()> {
-    let long = format!("{}/{}{}", &state.cachefolder, certnum, maxdate.format(CACHEFORMAT));
+fn addtocache(
+    state: &State<Config>,
+    certnum: &str,
+    maxdate: DateTime<FixedOffset>,
+    response: &[u8],
+) -> io::Result<()> {
+    let long = format!(
+        "{}/{}{}",
+        &state.cachefolder,
+        certnum,
+        maxdate.format(CACHEFORMAT)
+    );
     let path = Path::new(&long);
     fs::write(path, response)
 }
 #[post("/<_..>", data = "<data>")]
-async fn upload2<'a>(config: &State<Config>, data: Data<'a>, remote_addr: std::net::SocketAddr) -> io::Result<(ContentType, Vec<u8>)> {
-    upload(config, data,remote_addr).await
+async fn upload2<'a>(
+    config: &State<Config>,
+    data: Data<'a>,
+    address: SocketAddr,
+) -> io::Result<(ContentType, Vec<u8>)> {
+    upload(config, data, address).await
 }
 #[get("/<_..>", data = "<data>")]
-async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net::SocketAddr) -> io::Result<(ContentType, Vec<u8>)> {
+async fn upload<'a>(
+    state: &State<Config>,
+    data: Data<'a>,
+    address: SocketAddr,
+) -> io::Result<(ContentType, Vec<u8>)> {
     let custom = ContentType::new("application", "ocsp-response");
     let stream = data.open(3.mebibytes());
     let string = stream.into_bytes().await?;
@@ -268,8 +290,8 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net
     let ocsp_request = match OcspRequest::parse(&vec) {
         Ok(r) => r,
         Err(e) => {
-            warn!("Unable to parse ocsp request from {}.",remote_addr);
-            debug!("Error is caused by {}",e);
+            warn!("Unable to parse ocsp request from {}", address.ip());
+            debug!("Unable to parse ocsp request, due to {e}.");
             return Ok((
                 custom,
                 signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
@@ -288,7 +310,7 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net
         }
         num = certnum.clone();
         if possible {
-            let result = checkcache(&state,certnum.clone());
+            let result = checkcache(&state, certnum.clone());
             if result.is_ok() {
                 let result = result.unwrap();
                 if result.is_some() {
@@ -317,7 +339,8 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net
         }
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
-            warn!(
+            warn!("Error creating OCSP response.");
+            debug!(
                 "Error creating OCSP response: {}",
                 resp.unwrap_err().to_string()
             );
@@ -331,9 +354,8 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net
     }
     let result = signresponse(&state.issuer_hash, state.rsakey.clone(), responses);
     if result.is_err() {
-        warn!("Unable to parse ocsp response");
-        debug!(
-            "Unable to parse ocsp response, due to {:?}.",
+        warn!(
+            "Unable to parse ocsp request, due to {:?}.",
             result.unwrap_err()
         );
         return Ok((
@@ -373,21 +395,21 @@ fn rocket() -> _ {
     let file = fs::read_to_string(config.itcert).unwrap();
     let certpem = x509::X509::from_pem(file.as_bytes()).unwrap();
     let issuer_hash = certpem.subject_key_id().unwrap().as_slice().to_vec();
-    let issuer_name_hash = certpem.subject_name_hash();
+    //let issuer_name_hash = certpem.subject_name_hash();
     let mut key = fs::read_to_string(config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
     key.zeroize();
     let port: u16 = u16::try_from(config.port).unwrap();
     let config = Config {
         issuer_hash,
-        issuer_name_hash,
+        //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
         cachedays: config.cachedays,
         dbip: config.dbip,
         dbuser: config.dbuser,
         dbpassword: config.dbpassword,
-        dbname: config.dbname
+        dbname: config.dbname,
     };
     let path = Path::new(config.cachefolder.as_str());
     if !path.exists() {
