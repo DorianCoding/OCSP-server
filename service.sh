@@ -23,15 +23,20 @@ fi
 echo "Creating binaries"
 if [ `getconf LONG_BIT` = "64" ]
 then
-  cp binaries/linux-x86_64_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
+  cp binaries/linux-x86_64_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/
 else
-  cp binaries/linux-x32_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
+  cp binaries/linux-x32_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/
 fi
 if [ $? -ne 0 ]
   then echo "Error copying files, exiting"
   exit
 fi
-chmod 640 config.toml && chmod 750 ocsp_server && chown root:pycert /var/ocsp/ && chmod 750 /var/ocsp/
+cd /var/ocsp
+if [ $? -ne 0 ]
+  then echo "Error moving to /var/ocsp"
+  exit
+fi
+chmod 640 config.toml && cp chmod 750 ocsp_server && chown root:pycert /var/ocsp/ && chmod 750 /var/ocsp/
 if [ $? -ne 0 ]
   then echo "Error setting files, exiting"
   exit

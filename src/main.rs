@@ -71,13 +71,12 @@ struct Fileconfig {
     itkey: String,
     itcert: String
 }
-#[allow(unsafe_code)]
-unsafe impl Send for Config {}
-#[allow(unsafe_code)]
-unsafe impl Sync for Config {}
-#[post("/<_..>", data = "<data>")]
-async fn upload2<'a>(config: &State<Config>, data: Data<'a>) -> io::Result<(ContentType, Vec<u8>)> {
-    upload(config, data).await
+#[derive(Debug, PartialEq, Clone)]
+struct Certinfo {
+    status: String,
+    revocation_time: Option<mysql::Value>,
+    revocation_reason: Option<String>,
+    cert: String,
 }
 fn signresponse(
     issuer_hash: &[u8],
@@ -107,13 +106,6 @@ fn signvalidresponse(bytes: ResponseBytes) -> Result<Vec<u8>, OcspError> {
 fn signnonvalidresponse(motif: OcspRespStatus) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_non_success(motif)?;
     ocsp.to_der()
-}
-#[derive(Debug, PartialEq, Clone)]
-struct Certinfo {
-    status: String,
-    revocation_time: Option<mysql::Value>,
-    revocation_reason: Option<String>,
-    cert: String,
 }
 fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, mysql::Error> {
     // Let's select payments from database. Type inference should do the trick here.
@@ -187,16 +179,16 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
 fn createocspresponse(
     cert: CertId,
     cert_status: CertStatus,
-    preparedate: bool,
+    preparedate: Option<u16>,
     thisupdate: Option<GeneralizedTime>,
     nextupdate: Option<GeneralizedTime>,
     extension: Option<Vec<ocsp::common::ocsp::OcspExtI>>,
 ) -> Result<OneResp, Box<dyn Error>> {
     let thisupdate = thisupdate.unwrap_or(GeneralizedTime::now());
     let mut nextupdate = nextupdate;
-    if preparedate {
+    if preparedate.is_some() {
         let now = chrono::offset::Utc::now();
-        let elem = now.checked_add_days(chrono::Days::new(3)).unwrap_or(now);
+        let elem = now.checked_add_days(chrono::Days::new(u64::from(preparedate.unwrap()))).unwrap_or(now);
         let new = GeneralizedTime::new(
             elem.year(),
             elem.month(),
@@ -245,6 +237,14 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
                 let text = fs::read(path)?;
                 warn!("Got {} from cache", &certname);
                 return Ok(Some(text));
+            } else {
+                let _ = match fs::remove_file(path) {
+                    Ok(_) => (),
+                    Err(e) =>  {
+                    warn!("Cannot remove file from cache: {}",e.to_string());
+                    ()
+                    }
+                };
             }
         }
     }
@@ -255,8 +255,12 @@ fn addtocache(state: &State<Config>, certnum: &str, maxdate: DateTime<FixedOffse
     let path = Path::new(&long);
     fs::write(path, response)
 }
+#[post("/<_..>", data = "<data>")]
+async fn upload2<'a>(config: &State<Config>, data: Data<'a>, remote_addr: std::net::SocketAddr) -> io::Result<(ContentType, Vec<u8>)> {
+    upload(config, data,remote_addr).await
+}
 #[get("/<_..>", data = "<data>")]
-async fn upload<'a>(state: &State<Config>, data: Data<'a>) -> io::Result<(ContentType, Vec<u8>)> {
+async fn upload<'a>(state: &State<Config>, data: Data<'a>, remote_addr: std::net::SocketAddr) -> io::Result<(ContentType, Vec<u8>)> {
     let custom = ContentType::new("application", "ocsp-response");
     let stream = data.open(3.mebibytes());
     let string = stream.into_bytes().await?;
@@ -264,7 +268,8 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>) -> io::Result<(Conten
     let ocsp_request = match OcspRequest::parse(&vec) {
         Ok(r) => r,
         Err(e) => {
-            warn!("Unable to parse ocsp request, due to {e}.");
+            warn!("Unable to parse ocsp request from {}.",remote_addr);
+            debug!("Error is caused by {}",e);
             return Ok((
                 custom,
                 signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
@@ -310,7 +315,7 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>) -> io::Result<(Conten
                 }
             };
         }
-        let resp = createocspresponse(cert, status, true, None, None, None);
+        let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
             warn!(
                 "Error creating OCSP response: {}",
@@ -326,8 +331,9 @@ async fn upload<'a>(state: &State<Config>, data: Data<'a>) -> io::Result<(Conten
     }
     let result = signresponse(&state.issuer_hash, state.rsakey.clone(), responses);
     if result.is_err() {
-        warn!(
-            "Unable to parse ocsp request, due to {:?}.",
+        warn!("Unable to parse ocsp response");
+        debug!(
+            "Unable to parse ocsp response, due to {:?}.",
             result.unwrap_err()
         );
         return Ok((
