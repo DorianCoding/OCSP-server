@@ -14,15 +14,16 @@ exclude = [
     "service.sh",
 ]
 [dependencies]
-chrono = "0.4.31"
-config-file = "0.2.3"
-hex = "0.4.3"
-mysql = "24.0.0"
-ocsp = "0.4.0"
-openssl = { version = "0.10.62", features = ["vendored"] }
-rocket = "0.5.0"
-serde = "1.0.193"
-zeroize = { version = "1.7.0", features = ["std", "zeroize_derive"] }
+chrono = "~0.4.31"
+config-file = "~0.2.3"
+hex = "~0.4.3"
+mysql = "~24.0.0"
+ocsp = "~0.4.0"
+#openssl = { version = "0.10.62", features = ["vendored"] }
+openssl = { version="~0.10.62" }
+rocket = "~0.5.0"
+serde = "~1.0.193"
+zeroize = { version = "~1.7.0", features = ["std", "zeroize_derive"] }
 [profile.dev.package.openssl-sys]
 opt-level=3
 [profile.release]

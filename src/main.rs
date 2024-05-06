@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate rocket;
 use chrono::{self, Timelike};
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime};
+use chrono::{DateTime, Datelike, FixedOffset};
 use config_file::FromConfigFile;
 use hex;
 use mysql::prelude::Queryable;
@@ -28,7 +28,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
-use zeroize::Zeroize;
+use zeroize::{Zeroize};
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 // In a real application, this would likely be more complex.
 #[derive(Debug)]
@@ -43,6 +43,14 @@ struct Config {
     dbname: String,
     cachefolder: String,
 }
+impl Drop for Config {
+    fn drop(&mut self) {
+        self.dbip.zeroize();
+        self.dbuser.zeroize();
+        self.dbpassword.zeroize();
+        self.dbname.zeroize();
+    }
+}
 #[derive(Deserialize)]
 struct Fileconfig {
     cachedays: u16,
@@ -55,6 +63,13 @@ struct Fileconfig {
     itkey: String,
     itcert: String,
 }
+#[derive(Debug, PartialEq, Clone)]
+struct Certinfo {
+    status: String,
+    revocation_time: Option<mysql::Value>,
+    revocation_reason: Option<String>,
+    cert: String,
+}
 #[test]
 fn testresponse() {
     use std::time::Instant;
@@ -62,7 +77,7 @@ fn testresponse() {
     let private_key = openssl::rsa::Rsa::generate(2048).unwrap();
     println!("Done.");
     let private_key = openssl::pkey::PKey::from_rsa(private_key).unwrap();
-    let mut tosign: Vec<u8> = Vec::with_capacity(3000);
+    let mut tosign = [0u8; 3000];
     println!("Generating random");
     let _ = openssl::rand::rand_priv_bytes(&mut tosign).unwrap();
     println!("Done!");
@@ -103,13 +118,6 @@ fn signnonvalidresponse(motif: OcspRespStatus) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_non_success(motif)?;
     ocsp.to_der()
 }
-#[derive(Debug, PartialEq, Clone)]
-struct Certinfo {
-    status: String,
-    revocation_time: Option<mysql::Value>,
-    revocation_reason: Option<String>,
-    cert: String,
-}
 fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, mysql::Error> {
     // Let's select payments from database. Type inference should do the trick here.
     let opts = OptsBuilder::new()
@@ -135,14 +143,14 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
         warn!("Entry not found for cert {}", certnum);
         Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
     } else {
-        let selected_payments = selected_payments[0].clone();
+        let statut = selected_payments[0].clone();
         debug!(
             "Entry found for cert {}, status {}",
-            certnum, selected_payments.status
+            certnum, statut.status
         );
-        if selected_payments.status == "Revoked" {
+        if statut.status == "Revoked" {
             let time = GeneralizedTime::now();
-            let date = &selected_payments.revocation_time;
+            let date = &statut.revocation_time;
             let timenew = match date {
                 Some(mysql::Value::Date(year, month, day, hour, min, sec, _ms)) => {
                     GeneralizedTime::new(
@@ -157,7 +165,7 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
                 _ => Ok(time),
             };
             let time = timenew.unwrap_or(time);
-            let motif = selected_payments.revocation_reason.unwrap_or_default();
+            let motif = statut.revocation_reason.unwrap_or_default();
             let motif = motif.as_str();
             let motif: CrlReason = match motif {
                 "key_compromise" => CrlReason::OcspRevokeKeyCompromise,
@@ -226,7 +234,7 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
             if elem.len() != 2 {
                 continue;
             }
-            let datetime = NaiveDateTime::parse_from_str(elem[1], CACHEFORMAT);
+            let datetime = DateTime::parse_from_str(elem[1], CACHEFORMAT);
             if datetime.is_err() {
                 continue;
             }
@@ -236,7 +244,7 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
                 .unwrap()
                 .as_millis();
             if datetime
-                >= chrono::NaiveDateTime::from_timestamp_millis(i64::try_from(time).unwrap())
+                >= DateTime::from_timestamp_millis(i64::try_from(time).unwrap())
                     .unwrap()
             {
                 let text = fs::read(path)?;
