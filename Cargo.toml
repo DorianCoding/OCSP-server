@@ -2,7 +2,7 @@
 name = "ocsp-server"
 authors = ["DorianCoding"]
 description = "OCSP server, listening for requests to give responses."
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/DorianCoding/OCSP_server"
@@ -19,15 +19,15 @@ config-file = "~0.2.3"
 hex = "~0.4.3"
 mysql = "~24.0.0"
 ocsp = "~0.4.0"
-#openssl = { version = "0.10.62", features = ["vendored"] }
-openssl = { version="~0.10.62" }
+openssl = { version = "0.10.62", features = ["vendored"] }
+#openssl = { version="~0.10.62" }
 rocket = "~0.5.0"
 serde = "~1.0.193"
 zeroize = { version = "~1.7.0", features = ["std", "zeroize_derive"] }
 [profile.dev.package.openssl-sys]
 opt-level=3
-[profile.release]
-strip = "symbols"
+#[profile.release]
+#strip = "symbols"
 [lints.rust]
 unsafe_code = "warn"
 [badges]

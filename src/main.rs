@@ -1,9 +1,8 @@
 #[macro_use]
 extern crate rocket;
-use chrono::{self, Timelike};
+use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
 use config_file::FromConfigFile;
-use hex;
 use mysql::prelude::Queryable;
 use mysql::*;
 use ocsp::request::OcspRequest;
@@ -28,7 +27,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
-use zeroize::{Zeroize};
+use zeroize::Zeroize;
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 // In a real application, this would likely be more complex.
 #[derive(Debug)]
@@ -79,7 +78,7 @@ fn testresponse() {
     let private_key = openssl::pkey::PKey::from_rsa(private_key).unwrap();
     let mut tosign = [0u8; 3000];
     println!("Generating random");
-    let _ = openssl::rand::rand_priv_bytes(&mut tosign).unwrap();
+    openssl::rand::rand_priv_bytes(&mut tosign).unwrap();
     println!("Done!");
     let time = Instant::now();
     for _ in 0..100 {
@@ -94,7 +93,7 @@ fn signresponse(
     private_key: pkey::PKey<pkey::Private>,
     response: Vec<OneResp>,
 ) -> Result<ResponseBytes, Box<dyn std::error::Error>> {
-    let id = ResponderId::new_key_hash(&issuer_hash); // responding by id
+    let id = ResponderId::new_key_hash(issuer_hash); // responding by id
     let produce = GeneralizedTime::now();
     let data = ResponseData::new(id, produce, response, None);
     let oid = Oid::new_from_dot(ALGO_SHA256_WITH_RSA_ENCRYPTION_DOT)?;
@@ -139,7 +138,7 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
             cert,
         },
     )?;
-    if selected_payments.len() == 0 {
+    if selected_payments.is_empty() {
         warn!("Entry not found for cert {}", certnum);
         Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
     } else {
@@ -154,20 +153,19 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
             let timenew = match date {
                 Some(mysql::Value::Date(year, month, day, hour, min, sec, _ms)) => {
                     GeneralizedTime::new(
-                        i32::from(year.clone()),
-                        u32::from(month.clone()),
-                        u32::from(day.clone()),
-                        u32::from(hour.clone()),
-                        u32::from(min.clone()),
-                        u32::from(sec.clone()),
+                        i32::from(*year),
+                        u32::from(*month),
+                        u32::from(*day),
+                        u32::from(*hour),
+                        u32::from(*min),
+                        u32::from(*sec),
                     )
                 }
                 _ => Ok(time),
             };
             let time = timenew.unwrap_or(time);
             let motif = statut.revocation_reason.unwrap_or_default();
-            let motif = motif.as_str();
-            let motif: CrlReason = match motif {
+            let motif: CrlReason = match motif.as_str() {
                 "key_compromise" => CrlReason::OcspRevokeKeyCompromise,
                 "ca_compromise" => CrlReason::OcspRevokeCaCompromise,
                 "affiliation_changed" => CrlReason::OcspRevokeAffChanged,
@@ -214,13 +212,13 @@ fn createocspresponse(
     }
     Ok(OneResp {
         cid: cert,
-        cert_status: cert_status,
+        cert_status,
         this_update: thisupdate,
         next_update: nextupdate,
         one_resp_ext: extension,
     })
 }
-fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<u8>>> {
+fn checkcache(state: &State<Config>, certname: &str) -> io::Result<Option<Vec<u8>>> {
     let paths = fs::read_dir(&state.cachefolder)?;
     for path in paths {
         let path = path?.path();
@@ -229,13 +227,14 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
             .unwrap_or_default()
             .to_str()
             .unwrap_or_default();
-        if filename.starts_with(&certname) {
+        if filename.starts_with(certname) {
             let elem: Vec<&str> = filename.split(&certname).collect();
             if elem.len() != 2 {
                 continue;
             }
-            let datetime = DateTime::parse_from_str(elem[1], CACHEFORMAT);
+            let datetime = NaiveDateTime::parse_from_str(elem[1], CACHEFORMAT);
             if datetime.is_err() {
+                println!("Cannot parse datetime {}",elem[1]);
                 continue;
             }
             let datetime = datetime.unwrap();
@@ -243,7 +242,7 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
-            if datetime
+            if datetime.and_utc()
                 >= DateTime::from_timestamp_millis(i64::try_from(time).unwrap())
                     .unwrap()
             {
@@ -251,7 +250,7 @@ fn checkcache(state: &State<Config>, certname: String) -> io::Result<Option<Vec<
                 warn!("Got {} from cache", &certname);
                 return Ok(Some(text));
             } else {
-                let _ = match fs::remove_file(path) {
+                match fs::remove_file(path) {
                     Ok(_) => (),
                     Err(e) => {
                         warn!("Cannot remove file because {}", e)
@@ -310,20 +309,17 @@ async fn upload<'a>(
     let cid_list = ocsp_request.extract_certid_owned();
     let mut responses: Vec<OneResp> = Vec::new();
     let mut num = String::new();
-    let possible = if cid_list.len() > 1 { false } else { true };
+    let possible = cid_list.len() <= 1;
     for cert in cid_list {
-        let mut certnum: String = hex::encode(&cert.serial_num);
-        if !certnum.starts_with("0x") {
-            certnum.insert_str(0, "0x");
-        }
-        num = certnum.clone();
+        num = match hex::encode(&cert.serial_num).starts_with("0x") {
+            true => hex::encode(&cert.serial_num),
+            false => format!("{}{}","0x",hex::encode(&cert.serial_num))
+        };
         if possible {
-            let result = checkcache(&state, certnum.clone());
+            let result = checkcache(state, &num);
             if result.is_ok() {
                 let result = result.unwrap();
-                if result.is_some() {
-                    return Ok((custom, result.unwrap()));
-                }
+                if let Some(d) = result { return Ok((custom, d)) }
             }
         }
         let mut status = CertStatus::new(CertStatusCode::Unknown, None);
@@ -334,7 +330,7 @@ async fn upload<'a>(
         if cert.issuer_key_hash != state.issuer_hash {
             warn!("Certificate {} is not known", hex::encode(&cert.serial_num));
         } else {
-            status = match checkcert(&state, &certnum.clone()) {
+            status = match checkcert(state, &num) {
                 Ok(status) => status,
                 Err(default) => {
                     error!("Cannot connect to database: {}", default.to_string());
@@ -360,6 +356,7 @@ async fn upload<'a>(
         let resp = resp.unwrap();
         responses.push(resp);
     }
+    let certnum = num;
     let result = signresponse(&state.issuer_hash, state.rsakey.clone(), responses);
     if result.is_err() {
         warn!(
@@ -384,7 +381,7 @@ async fn upload<'a>(
         let date = chrono::Local::now();
         let date = date.checked_add_days(chrono::Days::new(state.cachedays.into())); //TODO: Implement
         if date.is_some() {
-            match addtocache(&state, &num, date.unwrap().fixed_offset(), &response) {
+            match addtocache(state, &certnum, date.unwrap().fixed_offset(), &response) {
                 Ok(_) => (),
                 Err(_) => {
                     warn!("Cannot write cache");
