@@ -43,7 +43,7 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 > Config.toml should be read-only for the script and inaccessible for others because it contains dbpassword.
 > Intermediate/Signer certificate key should be held secret, must be read-only for the script and inaccessible to anyone else. The intermediate/Signer certificate should be world-readonly, including to the script.
 > As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection. All the filesystem is locked by systemd except the cache folder.
-> The responder will reply to any certificate that are present in the database, whatever they are currently expired or not.
+> The responder will reply to any certificate that are present in the database, *whatever they are currently expired or not*.
 
 
 ## How to implement?
