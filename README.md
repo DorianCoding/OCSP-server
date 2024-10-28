@@ -35,8 +35,8 @@ port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used 
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
-itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate
-itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret
+itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate as PEM format
+itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret (PKCS#8 format, only RSA keys supported so far)
 ```
 
 > [!CAUTION]

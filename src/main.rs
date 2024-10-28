@@ -27,14 +27,16 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
-use x509_parser::oid_registry::OID_X509_EXT_SUBJECT_KEY_IDENTIFIER;
+use x509_parser::oid_registry::{
+    OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER, OID_X509_EXT_SUBJECT_KEY_IDENTIFIER,
+};
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 // In a real application, this would likely be more complex.
 #[derive(Debug)]
 struct Config {
-    issuer_hash: Vec<u8>,
+    issuer_hash: Vec<Vec<u8>>,
     //issuer_name_hash: u32,
     rsakey: ring::signature::RsaKeyPair,
     cachedays: u16,
@@ -63,14 +65,12 @@ struct Fileconfig {
     cachefolder: String,
     itkey: String,
     itcert: String,
-    realhash: Option<String>,
 }
 #[derive(Debug, PartialEq, Clone)]
 struct Certinfo {
     status: String,
     revocation_time: Option<mysql::Value>,
-    revocation_reason: Option<String>,
-    cert: String,
+    revocation_reason: Option<String>
 }
 #[test]
 fn testresponse() {
@@ -157,13 +157,12 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
     };
     let mut conn = Conn::new(opts)?;
     let selected_payments = conn.exec_map(
-        "SELECT status, revocation_time, revocation_reason, cert FROM list_certs WHERE cert_num=?",
+        "SELECT status, revocation_time, revocation_reason FROM list_certs WHERE cert_num=?",
         (String::from(certnum).into_bytes(),),
-        |(status, revocation_time, revocation_reason, cert)| Certinfo {
+        |(status, revocation_time, revocation_reason)| Certinfo {
             status,
             revocation_time,
-            revocation_reason,
-            cert,
+            revocation_reason
         },
     )?;
     if selected_payments.is_empty() {
@@ -330,11 +329,29 @@ async fn upload<'a>(
             ));
         }
     };
+    //Reject bad nonces RFC 8954 https://www.rfc-editor.org/rfc/rfc8954
+    match ocsp_request.tbs_request.request_ext.clone().and_then(|p| {
+        p.iter()
+            .filter_map(|o| match &o.ext {
+                ocsp::common::ocsp::OcspExt::Nonce { nonce } => Some(nonce.len()),
+                _ => None,
+            })
+            .last()
+    }) {
+        Some(1..32) => (),
+        _ => {
+            return Ok((
+                custom,
+                signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
+            ));
+        }
+    }
     // get CertId from request
     let cid_list = ocsp_request.extract_certid_owned();
     let mut responses: Vec<OneResp> = Vec::new();
     let mut num = String::new();
     let possible = cid_list.len() <= 1;
+    let mut goodkey = state.issuer_hash.first().unwrap();
     for cert in cid_list {
         num = match hex::encode(&cert.serial_num).starts_with("0x") {
             true => hex::encode(&cert.serial_num),
@@ -350,29 +367,37 @@ async fn upload<'a>(
             }
         }
         let mut status = CertStatus::new(CertStatusCode::Unknown, None);
-        /* let mut opensslshorthash: [u8;4] = [0;4];
-        opensslshorthash.clone_from_slice(&cert.issuer_name_hash[..4]);
-        let opensslshorthash=u32::from_le_bytes(opensslshorthash); TODO: Implement */
-        //if  opensslshorthash != state.issuer_name_hash
-        if cert.issuer_key_hash != state.issuer_hash {
-            warn!(
-                "Certificate {} is not known. Hash is not okay. Expected: {}. Got {}",
-                hex::encode(&cert.serial_num),
-                hex::encode(&cert.issuer_key_hash),
-                hex::encode(&state.issuer_hash)
-            );
-        } else {
-            status = match checkcert(state, &num) {
-                Ok(status) => status,
-                Err(default) => {
-                    error!("Cannot connect to database: {}", default.to_string());
-                    return Ok((
-                        custom,
-                        signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
-                    ));
-                }
-            };
-        }
+        //Compare that signing certificate is signed by the issuer or the issuer itself https://www.rfc-editor.org/rfc/rfc6960
+        let newkey = state
+            .issuer_hash
+            .iter()
+            .find(|p| *p == &cert.issuer_key_hash);
+        match newkey {
+            None => {
+                warn!(
+                    "Certificate {} is not known. Hash is not okay. Expected: {}. Got one of {}",
+                    hex::encode(&cert.serial_num),
+                    hex::encode(&cert.issuer_key_hash),
+                    state.issuer_hash.iter().fold(String::new(), |mut acc, f| {
+                        acc.push_str(&hex::encode(f).to_string());
+                        acc
+                    })
+                );
+            }
+            Some(key) => {
+                goodkey = key; //Put the new key as good key
+                status = match checkcert(state, &num) {
+                    Ok(status) => status,
+                    Err(default) => {
+                        error!("Cannot connect to database: {}", default.to_string());
+                        return Ok((
+                            custom,
+                            signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
+                        ));
+                    }
+                };
+            }
+        };
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
             error!("Error creating OCSP response.");
@@ -389,7 +414,7 @@ async fn upload<'a>(
         responses.push(resp);
     }
     let certnum = num;
-    let result = signresponse(&state.issuer_hash, &state.rsakey, responses);
+    let result = signresponse(goodkey, &state.rsakey, responses);
     if result.is_err() {
         warn!(
             "Unable to parse ocsp request, due to {:?}.",
@@ -436,26 +461,30 @@ fn rocket() -> _ {
     let file = fs::read_to_string(config.itcert).unwrap();
     let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).unwrap().1;
     let certpem = certpem.parse_x509().unwrap();
-    let issuerkey = match config.realhash {
-        Some(hex) => {
-            println!("Getting a different key to check issuer. If you sign with issuer, delete realhash from config file");
-            hex.to_uppercase().replace(":", "")
-        },
-        None => {
-            let parsed = certpem
-                .get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER)
-                .unwrap()
-                .unwrap()
-                .parsed_extension();
-            let issuerkey = match parsed {
-                ParsedExtension::SubjectKeyIdentifier(a) => a,
-                _ => {
-                    panic!("Error getting key");
-                }
-            };
-            format!("{:x}", issuerkey).to_uppercase().replace(":", "")
+    let parsed = certpem
+        .get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER)
+        .unwrap()
+        .unwrap()
+        .parsed_extension();
+    let issuerkey = match parsed {
+        ParsedExtension::SubjectKeyIdentifier(a) => a,
+        _ => {
+            panic!("Error getting key");
         }
     };
+    let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
+    let parsed = certpem
+        .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
+        .unwrap()
+        .unwrap()
+        .parsed_extension();
+    let issuerkey = match parsed {
+        ParsedExtension::AuthorityKeyIdentifier(a) => a.key_identifier.as_ref().unwrap(),
+        _ => {
+            panic!("Error getting key");
+        }
+    };
+    let authoritykey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     /* let certpempublickey = &certpem.public_key().subject_public_key.data;
     let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey); */
     //let issuer_name_hash = certpem.subject_name_hash();
@@ -464,7 +493,10 @@ fn rocket() -> _ {
     key.zeroize();
     let port: u16 = u16::try_from(config.port).unwrap();
     let config = Config {
-        issuer_hash: hex::decode(issuerkey).unwrap(),
+        issuer_hash: vec![
+            hex::decode(subjectkey).unwrap(),
+            hex::decode(authoritykey).unwrap(),
+        ],
         //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
