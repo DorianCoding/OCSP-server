@@ -16,11 +16,7 @@ use ocsp::{
         RevokedInfo,
     },
 };
-use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
-use ring::{
-    rand,
-    signature,
-};
+use ring::{rand, signature};
 use rocket::http::ContentType;
 use rocket::State;
 use rocket::{data::ToByteUnit, Data};
@@ -31,6 +27,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
+use x509_parser::oid_registry::OID_X509_EXT_SUBJECT_KEY_IDENTIFIER;
+use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 // In a real application, this would likely be more complex.
@@ -40,7 +38,7 @@ struct Config {
     //issuer_name_hash: u32,
     rsakey: ring::signature::RsaKeyPair,
     cachedays: u16,
-    dbip: String,
+    dbip: Option<String>,
     dbuser: String,
     dbpassword: String,
     dbname: String,
@@ -57,7 +55,7 @@ impl Drop for Config {
 #[derive(Deserialize)]
 struct Fileconfig {
     cachedays: u16,
-    dbip: String,
+    dbip: Option<String>,
     port: u32,
     dbuser: String,
     dbpassword: String,
@@ -65,6 +63,7 @@ struct Fileconfig {
     cachefolder: String,
     itkey: String,
     itcert: String,
+    realhash: Option<String>,
 }
 #[derive(Debug, PartialEq, Clone)]
 struct Certinfo {
@@ -76,8 +75,8 @@ struct Certinfo {
 #[test]
 fn testresponse() {
     use ring::rand::SecureRandom;
-    use std::time::Instant;
     use ring::signature::KeyPair;
+    use std::time::Instant;
     println!("Generating key, may take a while...");
     let rng = rand::SystemRandom::new();
     let pkcs8_bytes = signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
@@ -147,12 +146,15 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
     // Let's select payments from database. Type inference should do the trick here.
     let opts = OptsBuilder::new()
         .user(Some(config.dbuser.as_str()))
-        .prefer_socket(true)
-        //.socket(Some("/run/mysqld/mysqld.sock"))
-        .ip_or_hostname(Some(config.dbip.as_str()))
         .read_timeout(Some(Duration::new(5, 0)))
         .db_name(Some(config.dbname.as_str()))
         .pass(Some(config.dbpassword.as_str()));
+    let opts = match &config.dbip {
+        Some(string) => opts.ip_or_hostname(Some(string)),
+        None => opts
+            .prefer_socket(true)
+            .socket(Some("/run/mysqld/mysqld.sock")),
+    };
     let mut conn = Conn::new(opts)?;
     let selected_payments = conn.exec_map(
         "SELECT status, revocation_time, revocation_reason, cert FROM list_certs WHERE cert_num=?",
@@ -253,7 +255,7 @@ fn checkcache(state: &State<Config>, certname: &str) -> io::Result<Option<Vec<u8
         if filename.starts_with(certname) {
             let elem: Vec<&str> = filename.split(&certname).collect();
             if elem.len() != 2 {
-                warn!("Invalid filename to check cache: {}",filename);
+                warn!("Invalid filename to check cache: {}", filename);
                 continue;
             }
             let datetime = NaiveDateTime::parse_from_str(elem[1], CACHEFORMAT);
@@ -353,7 +355,12 @@ async fn upload<'a>(
         let opensslshorthash=u32::from_le_bytes(opensslshorthash); TODO: Implement */
         //if  opensslshorthash != state.issuer_name_hash
         if cert.issuer_key_hash != state.issuer_hash {
-            warn!("Certificate {} is not known. Hash is not okay. Expected: {}. Got {}", hex::encode(&cert.serial_num), hex::encode(&cert.issuer_key_hash),hex::encode(&state.issuer_hash));
+            warn!(
+                "Certificate {} is not known. Hash is not okay. Expected: {}. Got {}",
+                hex::encode(&cert.serial_num),
+                hex::encode(&cert.issuer_key_hash),
+                hex::encode(&state.issuer_hash)
+            );
         } else {
             status = match checkcert(state, &num) {
                 Ok(status) => status,
@@ -414,10 +421,13 @@ async fn upload<'a>(
             }
         }
     }
-    info!("Send response for certificate {}",&certnum);
+    info!("Send response for certificate {}", &certnum);
     Ok((custom, response))
 }
-fn getprivatekey<T>(data: T) -> Result<ring::rsa::KeyPair, ring::error::KeyRejected> where T: AsRef<[u8]> {
+fn getprivatekey<T>(data: T) -> Result<ring::rsa::KeyPair, ring::error::KeyRejected>
+where
+    T: AsRef<[u8]>,
+{
     ring::rsa::KeyPair::from_pkcs8(data.as_ref())
 }
 #[launch]
@@ -426,26 +436,35 @@ fn rocket() -> _ {
     let file = fs::read_to_string(config.itcert).unwrap();
     let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).unwrap().1;
     let certpem = certpem.parse_x509().unwrap();
-    /* let parsed = certpem.get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER).unwrap().unwrap().parsed_extension();
-    let issuerkey = match parsed {
-        ParsedExtension::AuthorityKeyIdentifier(a) => a,
-        _ => {
-            panic!("Error getting key");
+    let issuerkey = match config.realhash {
+        Some(hex) => {
+            println!("Getting a different key to check issuer. If you sign with issuer, delete realhash from config file");
+            hex.to_uppercase().replace(":", "")
+        },
+        None => {
+            let parsed = certpem
+                .get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER)
+                .unwrap()
+                .unwrap()
+                .parsed_extension();
+            let issuerkey = match parsed {
+                ParsedExtension::SubjectKeyIdentifier(a) => a,
+                _ => {
+                    panic!("Error getting key");
+                }
+            };
+            format!("{:x}", issuerkey).to_uppercase().replace(":", "")
         }
     };
-        //TODO: Marche pas
-    let issuerkey = &issuerkey.key_identifier;
-    let issuerkey = issuerkey.as_ref().unwrap().0;
-    println!("Data is {}/{}",hex::encode(issuerkey), hex::encode(issuerkey));  */
-    let certpempublickey = &certpem.public_key().subject_public_key.data;
-    let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey);
+    /* let certpempublickey = &certpem.public_key().subject_public_key.data;
+    let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey); */
     //let issuer_name_hash = certpem.subject_name_hash();
     let mut key = fs::read(config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
     key.zeroize();
     let port: u16 = u16::try_from(config.port).unwrap();
     let config = Config {
-        issuer_hash: sha1key.as_ref().to_vec(),
+        issuer_hash: hex::decode(issuerkey).unwrap(),
         //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
