@@ -41,7 +41,7 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 > [!CAUTION]
 > Config.toml should be read-only for the script and inaccessible for others because it contains dbpassword.
-> Intermediate certificate key should be held secret, must be read-only for the script and inaccessible to anyone else. The intermediate certificate should be world-readonly, including to the script.
+> Intermediate/Signer certificate key should be held secret, must be read-only for the script and inaccessible to anyone else. The intermediate/Signer certificate should be world-readonly, including to the script.
 > As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection. All the filesystem is locked by systemd except the cache folder.
 > The responder will reply to any certificate that are present in the database, whatever they are currently expired or not.
 
@@ -65,12 +65,11 @@ CREATE TABLE `list_certs` (
   `cert_num` varchar(50) NOT NULL,
   `revocation_time` datetime DEFAULT NULL,
   `revocation_reason` enum('unspecified','key_compromise','ca_compromise','affiliation_changed','superseded','cessation_of_operation','certificate_hold','privilege_withdrawn','aa_compromise') DEFAULT NULL,
-  `cert` blob NOT NULL,
   `status` enum('Valid','Revoked') NOT NULL DEFAULT 'Valid',
   PRIMARY KEY (`cert_num`),
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ```
-- The certificate number **must be unique** and start with 0x (like a hex number). Cert must contain the certificate in PEM format. Revocaition_time must be in UTC timezone.
+- The certificate number **must be unique** and start with 0x (like a hex number). Revocaition_time must be in UTC timezone.
 - When the certificate is valid, status must be "Valid" and revocation_time and reason must be NULL. On the opposite, upon revocation, status must be "Revoked" and revocation_time and reason must be set.
 ## Script test and timeline
 ### Test integration
