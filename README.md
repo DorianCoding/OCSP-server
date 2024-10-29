@@ -69,7 +69,7 @@ CREATE TABLE `list_certs` (
   PRIMARY KEY (`cert_num`),
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ```
-- The certificate number **must be unique** and start with 0x (like a hex number). Revocaition_time must be in UTC timezone.
+- The certificate number **must be unique** and start with 0x (like a hex number). Revocation_time must be in UTC timezone.
 - When the certificate is valid, status must be "Valid" and revocation_time and reason must be NULL. On the opposite, upon revocation, status must be "Revoked" and revocation_time and reason must be set.
 ## Script test and timeline
 ### Test integration

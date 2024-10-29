@@ -1289,8 +1289,7 @@ dependencies = [
 [[package]]
 name = "ocsp"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef2010711f55f8ed2627630936202af42741336bc1ceaf1b0b256e02e821f18"
+source = "git+https://github.com/DorianCoding/ocsp-rs.git#2296b04dee43848b77be02916946745dd87f0d52"
 dependencies = [
  "asn1_der",
  "chrono",
@@ -1299,6 +1298,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-futures",
+ "yasna",
 ]
 
 [[package]]
@@ -2596,6 +2596,12 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 dependencies = [
  "is-terminal",
 ]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
 
 [[package]]
 name = "zerocopy"

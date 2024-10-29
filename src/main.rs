@@ -5,6 +5,11 @@ use chrono::{DateTime, Datelike, FixedOffset};
 use config_file::FromConfigFile;
 use mysql::prelude::Queryable;
 use mysql::*;
+use ocsp::common::asn1::Bytes;
+use ocsp::common::ocsp::{OcspExt, OcspExtI};
+use ocsp::oid::{
+    i2b_oid, OCSP_EXT_EXTENDED_REVOKE_DOT, OCSP_EXT_EXTENDED_REVOKE_HEX, OCSP_EXT_NONCE_HEX,
+};
 use ocsp::request::OcspRequest;
 use ocsp::{
     common::asn1::{CertId, GeneralizedTime, Oid},
@@ -36,10 +41,12 @@ const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 // In a real application, this would likely be more complex.
 #[derive(Debug)]
 struct Config {
-    issuer_hash: Vec<Vec<u8>>,
+    issuer_hash: (Vec<u8>, Vec<u8>,bool),
+    cert: Bytes,
     //issuer_name_hash: u32,
     rsakey: ring::signature::RsaKeyPair,
     cachedays: u16,
+    caching: bool,
     dbip: Option<String>,
     dbuser: String,
     dbpassword: String,
@@ -57,6 +64,7 @@ impl Drop for Config {
 #[derive(Deserialize)]
 struct Fileconfig {
     cachedays: u16,
+    caching: bool,
     dbip: Option<String>,
     port: u32,
     dbuser: String,
@@ -70,7 +78,7 @@ struct Fileconfig {
 struct Certinfo {
     status: String,
     revocation_time: Option<mysql::Value>,
-    revocation_reason: Option<String>
+    revocation_reason: Option<String>,
 }
 #[test]
 fn testresponse() {
@@ -115,10 +123,12 @@ fn signresponse(
     issuer_hash: &[u8],
     private_key: &ring::rsa::KeyPair,
     response: Vec<OneResp>,
+    extensions: Option<Vec<OcspExtI>>,
+    cert: Option<Vec<Bytes>>
 ) -> Result<ResponseBytes, Box<dyn std::error::Error>> {
     let id = ResponderId::new_key_hash(issuer_hash); // responding by id
     let produce = GeneralizedTime::now();
-    let data = ResponseData::new(id, produce, response, None);
+    let data = ResponseData::new(id, produce, response, extensions);
     let oid = Oid::new_from_dot(ALGO_SHA256_WITH_RSA_ENCRYPTION_DOT)?;
     let rng = rand::SystemRandom::new();
     let tosign = &data.to_der()?;
@@ -127,7 +137,7 @@ fn signresponse(
         .sign(&signature::RSA_PKCS1_SHA256, &rng, tosign, &mut signature)
         .unwrap();
     assert_ne!(&signature, tosign);
-    let basic = BasicResponse::new(data, oid, signature, None);
+    let basic = BasicResponse::new(data, oid, signature, cert);
     // equivalent to
     // let resp_type = Oid::new_from_dot("1.3.6.1.5.5.7.48.1.1").await?;
     let resp_type = Oid::new_from_dot(OCSP_RESPONSE_BASIC_DOT)?;
@@ -162,7 +172,7 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
         |(status, revocation_time, revocation_reason)| Certinfo {
             status,
             revocation_time,
-            revocation_reason
+            revocation_reason,
         },
     )?;
     if selected_payments.is_empty() {
@@ -329,7 +339,7 @@ async fn upload<'a>(
             ));
         }
     };
-    //Reject bad nonces RFC 8954 https://www.rfc-editor.org/rfc/rfc8954
+    
     match ocsp_request.tbs_request.request_ext.clone().and_then(|p| {
         p.iter()
             .filter_map(|o| match &o.ext {
@@ -338,7 +348,7 @@ async fn upload<'a>(
             })
             .last()
     }) {
-        Some(1..32) => (),
+        Some(1..128) | None => (),
         _ => {
             return Ok((
                 custom,
@@ -347,11 +357,13 @@ async fn upload<'a>(
         }
     }
     // get CertId from request
+    let tbs = ocsp_request.tbs_request.request_ext.clone();
     let cid_list = ocsp_request.extract_certid_owned();
     let mut responses: Vec<OneResp> = Vec::new();
     let mut num = String::new();
-    let possible = cid_list.len() <= 1;
-    let mut goodkey = state.issuer_hash.first().unwrap();
+    let possible = cid_list.len() <= 1 && state.caching;
+    let mut extensions = Vec::with_capacity(cid_list.len());
+    let mut needthecert = false;
     for cert in cid_list {
         num = match hex::encode(&cert.serial_num).starts_with("0x") {
             true => hex::encode(&cert.serial_num),
@@ -366,26 +378,47 @@ async fn upload<'a>(
                 }
             }
         }
+        let nonce = match state.caching {
+            true => None,
+            false => {
+                let nonce = tbs.clone().map_or_else(
+                    || None,
+                    |f| {
+                        let mut vec: Vec<Vec<u8>> = f
+                            .iter()
+                            .filter_map(|p| {
+                                if let OcspExt::Nonce { nonce: d } = p.ext.clone() {
+                                    Some(d)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if vec.len() != 1 {
+                            None
+                        } else {
+                            Some(vec.pop().unwrap())
+                        }
+                    },
+                );
+                nonce.map(|d| {
+                    OcspExtI {
+                        id: 0,
+                        ext: ocsp::common::ocsp::OcspExt::Nonce { nonce: d.to_vec() },
+                    }
+                })
+            }
+        };
+        if let Some(nonce) = nonce {
+            extensions.push(nonce);
+        }
         let mut status = CertStatus::new(CertStatusCode::Unknown, None);
         //Compare that signing certificate is signed by the issuer or the issuer itself https://www.rfc-editor.org/rfc/rfc6960
-        let newkey = state
-            .issuer_hash
-            .iter()
-            .find(|p| *p == &cert.issuer_key_hash);
-        match newkey {
-            None => {
-                warn!(
-                    "Certificate {} is not known. Hash is not okay. Expected: {}. Got one of {}",
-                    hex::encode(&cert.serial_num),
-                    hex::encode(&cert.issuer_key_hash),
-                    state.issuer_hash.iter().fold(String::new(), |mut acc, f| {
-                        acc.push_str(&hex::encode(f).to_string());
-                        acc
-                    })
-                );
-            }
-            Some(key) => {
-                goodkey = key; //Put the new key as good key
+        match (cert.issuer_key_hash == state.issuer_hash.0,state.issuer_hash.1 == cert.issuer_key_hash) {
+            (true,_) | (_,true) if state.issuer_hash.2 => {
+                if state.issuer_hash.1 == cert.issuer_key_hash && state.issuer_hash.2 {
+                    needthecert = true;
+                }
                 status = match checkcert(state, &num) {
                     Ok(status) => status,
                     Err(default) => {
@@ -396,8 +429,24 @@ async fn upload<'a>(
                         ));
                     }
                 };
+            },
+            (_,true) if !state.issuer_hash.2 => {
+                error!("Certificate used has not OCSP signing extended key usage and cannot sign OCSP!");
+            }
+            _ => {
+                warn!(
+                    "Certificate {} is not known. Hash is not okay. Got: {}. Expected one of {}",
+                    hex::encode(&cert.serial_num),
+                    hex::encode(&cert.issuer_key_hash),
+                    &format!("{:?}", state.issuer_hash)
+                );
             }
         };
+        /* let mut extension = OcspExtI {
+            id: i2b_oid(ocsp::common::asn1::Oid::new_from_dot(OCSP_EXT_EXTENDED_REVOKE_DOT)),
+            ext: ocsp::common::ocsp::OcspExt::CrlRef { url: None, num: Some(OCSP_EXT_EXTENDED_REVOKE_HEX.to_vec()), time: None }
+        };
+        let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, Some(vec![extension])); */
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
             error!("Error creating OCSP response.");
@@ -414,7 +463,9 @@ async fn upload<'a>(
         responses.push(resp);
     }
     let certnum = num;
-    let result = signresponse(goodkey, &state.rsakey, responses);
+    let extensions = if extensions.is_empty() { None } else { Some(extensions)};
+    let needthecert: Option<Vec<Bytes>> = if needthecert { Some(vec!(state.cert.clone())) } else {None};
+    let result = signresponse(&state.issuer_hash.0, &state.rsakey, responses, extensions, needthecert);
     if result.is_err() {
         warn!(
             "Unable to parse ocsp request, due to {:?}.",
@@ -459,6 +510,7 @@ where
 fn rocket() -> _ {
     let config = Fileconfig::from_config_file("config.toml").unwrap();
     let file = fs::read_to_string(config.itcert).unwrap();
+    let file2 = fs::read("public_files/it2_cert.der").unwrap();
     let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).unwrap().1;
     let certpem = certpem.parse_x509().unwrap();
     let parsed = certpem
@@ -472,6 +524,13 @@ fn rocket() -> _ {
             panic!("Error getting key");
         }
     };
+    let isocsp = certpem
+        .extended_key_usage()
+        .unwrap()
+        .map_or(false, |f| f.value.ocsp_signing);
+    if !isocsp {
+        warn!("Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response.")
+    }
     let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     let parsed = certpem
         .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
@@ -493,19 +552,23 @@ fn rocket() -> _ {
     key.zeroize();
     let port: u16 = u16::try_from(config.port).unwrap();
     let config = Config {
-        issuer_hash: vec![
+        issuer_hash: (
             hex::decode(subjectkey).unwrap(),
             hex::decode(authoritykey).unwrap(),
-        ],
+            isocsp
+        ),
+        cert: file2,
         //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
+        caching: config.caching,
         cachedays: config.cachedays,
         dbip: config.dbip,
         dbuser: config.dbuser,
         dbpassword: config.dbpassword,
         dbname: config.dbname,
     };
+    println!("Config is {:#?}", config);
     let path = Path::new(config.cachefolder.as_str());
     if !path.exists() {
         fs::create_dir_all(path).unwrap();
