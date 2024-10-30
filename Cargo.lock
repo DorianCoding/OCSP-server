@@ -1310,6 +1310,7 @@ dependencies = [
  "hex",
  "mysql",
  "ocsp",
+ "pem-parser",
  "ring",
  "rocket",
  "serde",
@@ -1392,6 +1393,15 @@ checksum = "6b13fe415cdf3c8e44518e18a7c95a13431d9bdf6d15367d82b23c377fdd441a"
 dependencies = [
  "base64",
  "serde",
+]
+
+[[package]]
+name = "pem-parser"
+version = "0.1.0"
+source = "git+https://github.com/yberreby/pem-parser-rs.git#5a3c3d840631e7a61605c2ed151e3fee759928df"
+dependencies = [
+ "regex",
+ "rustc-serialize",
 ]
 
 [[package]]
@@ -1700,6 +1710,12 @@ name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
+name = "rustc-serialize"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe834bc780604f4674073badbad26d7219cadfb4a2275802db12cbae17498401"
 
 [[package]]
 name = "rusticata-macros"

@@ -7,9 +7,6 @@ use mysql::prelude::Queryable;
 use mysql::*;
 use ocsp::common::asn1::Bytes;
 use ocsp::common::ocsp::{OcspExt, OcspExtI};
-use ocsp::oid::{
-    i2b_oid, OCSP_EXT_EXTENDED_REVOKE_DOT, OCSP_EXT_EXTENDED_REVOKE_HEX, OCSP_EXT_NONCE_HEX,
-};
 use ocsp::request::OcspRequest;
 use ocsp::{
     common::asn1::{CertId, GeneralizedTime, Oid},
@@ -21,6 +18,7 @@ use ocsp::{
         RevokedInfo,
     },
 };
+use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
 use ring::{rand, signature};
 use rocket::http::ContentType;
 use rocket::State;
@@ -32,9 +30,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
-use x509_parser::oid_registry::{
-    OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER, OID_X509_EXT_SUBJECT_KEY_IDENTIFIER,
-};
+use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
@@ -510,10 +506,10 @@ where
 fn rocket() -> _ {
     let config = Fileconfig::from_config_file("config.toml").unwrap();
     let file = fs::read_to_string(config.itcert).unwrap();
-    let file2 = fs::read("public_files/it2_cert.der").unwrap();
+    let file2 = pem_parser::pem_to_der(&file);
     let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).unwrap().1;
     let certpem = certpem.parse_x509().unwrap();
-    let parsed = certpem
+    /* let parsed = certpem
         .get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER)
         .unwrap()
         .unwrap()
@@ -523,7 +519,7 @@ fn rocket() -> _ {
         _ => {
             panic!("Error getting key");
         }
-    };
+    }; */
     let isocsp = certpem
         .extended_key_usage()
         .unwrap()
@@ -531,7 +527,7 @@ fn rocket() -> _ {
     if !isocsp {
         warn!("Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response.")
     }
-    let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
+    //let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     let parsed = certpem
         .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
         .unwrap()
@@ -544,8 +540,8 @@ fn rocket() -> _ {
         }
     };
     let authoritykey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
-    /* let certpempublickey = &certpem.public_key().subject_public_key.data;
-    let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey); */
+    let certpempublickey = &certpem.public_key().subject_public_key.data;
+    let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey);
     //let issuer_name_hash = certpem.subject_name_hash();
     let mut key = fs::read(config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
@@ -553,7 +549,8 @@ fn rocket() -> _ {
     let port: u16 = u16::try_from(config.port).unwrap();
     let config = Config {
         issuer_hash: (
-            hex::decode(subjectkey).unwrap(),
+            sha1key.as_ref().to_vec(),
+            //hex::decode(subjectkey).unwrap(),
             hex::decode(authoritykey).unwrap(),
             isocsp
         ),
@@ -568,7 +565,6 @@ fn rocket() -> _ {
         dbpassword: config.dbpassword,
         dbname: config.dbname,
     };
-    println!("Config is {:#?}", config);
     let path = Path::new(config.cachefolder.as_str());
     if !path.exists() {
         fs::create_dir_all(path).unwrap();
