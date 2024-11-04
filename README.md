@@ -29,15 +29,16 @@ The config file should contain the following informations :
 ```toml
 #Config file, all fields are compulsory
 cachedays = 3 #Number of days a response is valid once created (only for valid certificates)
-dbip = "127.0.0.1" #IP to connect to MySql database
+dbip = "127.0.0.1" #Optional. IP to connect to MySql database. If absent, use of unix socket.
+timeout = 5 #Optional timeout, default 5s
 dbuser = "cert" #Username to connect to MySql database
 port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service)
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
 itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate as PEM format
-revocextended = true //Optional, if you want to enable EXTENDED_REVOCATION
-caching = true //Optional, enable caching or enable nonce response.
+revocextended = true #Optional, if you want to enable EXTENDED_REVOCATION
+caching = true #Optional, enable caching or enable nonce response.
 itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret (PKCS#8 format, only RSA keys supported so far)
 ```
 
