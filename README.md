@@ -36,6 +36,8 @@ dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
 itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate as PEM format
+revocextended = true //Optional, if you want to enable EXTENDED_REVOCATION
+caching = true //Optional, enable caching or enable nonce response.
 itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret (PKCS#8 format, only RSA keys supported so far)
 ```
 

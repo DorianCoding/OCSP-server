@@ -39,6 +39,8 @@ const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 struct Config {
     issuer_hash: (Vec<u8>, Vec<u8>,bool),
     cert: Bytes,
+    revocextended: bool,
+    time: u8,
     //issuer_name_hash: u32,
     rsakey: ring::signature::RsaKeyPair,
     cachedays: u16,
@@ -60,9 +62,11 @@ impl Drop for Config {
 #[derive(Deserialize)]
 struct Fileconfig {
     cachedays: u16,
-    caching: bool,
+    caching: Option<bool>,
+    revocextended: Option<bool>,
     dbip: Option<String>,
     port: u32,
+    timeout: u8,
     dbuser: String,
     dbpassword: String,
     dbname: String,
@@ -148,11 +152,11 @@ fn signnonvalidresponse(motif: OcspRespStatus) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_non_success(motif)?;
     ocsp.to_der()
 }
-fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, mysql::Error> {
+fn checkcert(config: &State<Config>, certnum: &str, revoked: bool) -> Result<OcspCertStatus, mysql::Error> {
     // Let's select payments from database. Type inference should do the trick here.
     let opts = OptsBuilder::new()
         .user(Some(config.dbuser.as_str()))
-        .read_timeout(Some(Duration::new(5, 0)))
+        .read_timeout(Some(Duration::new(config.time as u64, 0)))
         .db_name(Some(config.dbname.as_str()))
         .pass(Some(config.dbpassword.as_str()));
     let opts = match &config.dbip {
@@ -162,7 +166,7 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
             .socket(Some("/run/mysqld/mysqld.sock")),
     };
     let mut conn = Conn::new(opts)?;
-    let selected_payments = conn.exec_map(
+    let status = conn.exec_map(
         "SELECT status, revocation_time, revocation_reason FROM list_certs WHERE cert_num=?",
         (String::from(certnum).into_bytes(),),
         |(status, revocation_time, revocation_reason)| Certinfo {
@@ -171,11 +175,15 @@ fn checkcert(config: &State<Config>, certnum: &str) -> Result<OcspCertStatus, my
             revocation_reason,
         },
     )?;
-    if selected_payments.is_empty() {
+    if status.is_empty() {
         warn!("Entry not found for cert {}", certnum);
-        Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
+        if !revoked {
+            Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
+        } else {
+            Ok(OcspCertStatus::new(CertStatusCode::Revoked, Some(RevokedInfo::new(GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(), Some(CrlReason::OcspRevokeCertHold)))))
+        }
     } else {
-        let statut = selected_payments[0].clone();
+        let statut = status[0].clone();
         debug!("Entry found for cert {}, status {}", certnum, statut.status);
         if statut.status == "Revoked" {
             let time = GeneralizedTime::now();
@@ -325,7 +333,10 @@ async fn upload<'a>(
     let string = stream.into_bytes().await?;
     let vec = string.into_inner();
     let ocsp_request = match OcspRequest::parse(&vec) {
-        Ok(r) => r,
+        Ok(r) => {
+            trace!("Got a request from {}",address.ip());
+            r
+        },
         Err(e) => {
             warn!("Unable to parse ocsp request from {}", address.ip());
             debug!("Unable to parse ocsp request, due to {e}.");
@@ -346,6 +357,7 @@ async fn upload<'a>(
     }) {
         Some(1..128) | None => (),
         _ => {
+            info!("Nonce is invalid on request by {}. Rejected.",address.ip());
             return Ok((
                 custom,
                 signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
@@ -408,14 +420,23 @@ async fn upload<'a>(
         if let Some(nonce) = nonce {
             extensions.push(nonce);
         }
-        let mut status = CertStatus::new(CertStatusCode::Unknown, None);
+        if state.revocextended {
+            let revoked = OcspExtI {
+                id: 8,
+                ext: ocsp::common::ocsp::OcspExt::ExtendedRevocation
+            };
+            extensions.push(revoked);
+        };
         //Compare that signing certificate is signed by the issuer or the issuer itself https://www.rfc-editor.org/rfc/rfc6960
-        match (cert.issuer_key_hash == state.issuer_hash.0,state.issuer_hash.1 == cert.issuer_key_hash) {
-            (true,_) | (_,true) if state.issuer_hash.2 => {
+        let status = match (cert.issuer_key_hash == state.issuer_hash.0,state.issuer_hash.1 == cert.issuer_key_hash, state.issuer_hash.2) {
+            (true,..) | (..,true, true) => {
                 if state.issuer_hash.1 == cert.issuer_key_hash && state.issuer_hash.2 {
+                    trace!("Certificate is matching issuer. Providing certificate.");
                     needthecert = true;
+                } else {
+                    trace!("Certificate is the issuer.");
                 }
-                status = match checkcert(state, &num) {
+                match checkcert(state, &num, state.revocextended) {
                     Ok(status) => status,
                     Err(default) => {
                         error!("Cannot connect to database: {}", default.to_string());
@@ -424,18 +445,24 @@ async fn upload<'a>(
                             signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
                         ));
                     }
-                };
+                }
             },
-            (_,true) if !state.issuer_hash.2 => {
+            (..,true,false) if !state.issuer_hash.2 => {
                 error!("Certificate used has not OCSP signing extended key usage and cannot sign OCSP!");
+                return Ok((
+                    custom,
+                    signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
+                ));
             }
             _ => {
                 warn!(
-                    "Certificate {} is not known. Hash is not okay. Got: {}. Expected one of {}",
+                    "Certificate {} is not known. Hash is not okay. Got: {}. Expected one of {}/{}",
                     hex::encode(&cert.serial_num),
                     hex::encode(&cert.issuer_key_hash),
-                    &format!("{:?}", state.issuer_hash)
+                    hex::encode(&state.issuer_hash.0),
+                    hex::encode(&state.issuer_hash.1)
                 );
+                CertStatus::new(CertStatusCode::Unknown, None)
             }
         };
         /* let mut extension = OcspExtI {
@@ -475,6 +502,7 @@ async fn upload<'a>(
     let result = result.unwrap();
     let response = signvalidresponse(result);
     if response.is_err() {
+        error!("Cannot sign the response.");
         return Ok((
             custom,
             signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
@@ -493,7 +521,7 @@ async fn upload<'a>(
             }
         }
     }
-    info!("Send response for certificate {}", &certnum);
+    info!("Send response for {} to {}", &certnum,address.ip());
     Ok((custom, response))
 }
 fn getprivatekey<T>(data: T) -> Result<ring::rsa::KeyPair, ring::error::KeyRejected>
@@ -504,11 +532,11 @@ where
 }
 #[launch]
 fn rocket() -> _ {
-    let config = Fileconfig::from_config_file("config.toml").unwrap();
-    let file = fs::read_to_string(config.itcert).unwrap();
+    let config = Fileconfig::from_config_file("config.toml").expect("No config file found.");
+    let file = fs::read_to_string(config.itcert).expect("Intermediate cert is not found");
     let file2 = pem_parser::pem_to_der(&file);
-    let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).unwrap().1;
-    let certpem = certpem.parse_x509().unwrap();
+    let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes()).expect("Invalid intermediate certificate.").1;
+    let certpem = certpem.parse_x509().expect("Invalid intermediate certificate.");
     /* let parsed = certpem
         .get_extension_unique(&OID_X509_EXT_SUBJECT_KEY_IDENTIFIER)
         .unwrap()
@@ -523,9 +551,9 @@ fn rocket() -> _ {
     let isocsp = certpem
         .extended_key_usage()
         .unwrap()
-        .map_or(false, |f| f.value.ocsp_signing);
+        .map_or(false, |f| f.value.ocsp_signing || f.value.any);
     if !isocsp {
-        warn!("Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response.")
+        eprintln!("Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response.")
     }
     //let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     let parsed = certpem
@@ -539,6 +567,7 @@ fn rocket() -> _ {
             panic!("Error getting key");
         }
     };
+    //For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
     let authoritykey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     let certpempublickey = &certpem.public_key().subject_public_key.data;
     let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey);
@@ -546,7 +575,14 @@ fn rocket() -> _ {
     let mut key = fs::read(config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
     key.zeroize();
-    let port: u16 = u16::try_from(config.port).unwrap();
+    let port: u16 = match u16::try_from(config.port) {
+        Ok(n @ 1..=65535) => {
+            n
+        },
+        _ => {
+            panic!("Invalid port number.")
+        }
+    };
     let config = Config {
         issuer_hash: (
             sha1key.as_ref().to_vec(),
@@ -554,11 +590,13 @@ fn rocket() -> _ {
             hex::decode(authoritykey).unwrap(),
             isocsp
         ),
+        revocextended: config.revocextended.unwrap_or(false),
         cert: file2,
+        time: config.timeout,
         //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
-        caching: config.caching,
+        caching: config.caching.unwrap_or(true),
         cachedays: config.cachedays,
         dbip: config.dbip,
         dbuser: config.dbuser,
@@ -567,7 +605,7 @@ fn rocket() -> _ {
     };
     let path = Path::new(config.cachefolder.as_str());
     if !path.exists() {
-        fs::create_dir_all(path).unwrap();
+        fs::create_dir_all(path).expect("Cannot create cache folder");
     }
     rocket::build()
         .configure(rocket::Config::figment().merge(("port", port)))
