@@ -18,7 +18,7 @@ chrono = { version = "~0.4.31", default-features = false, features = ["std"]}
 config-file = "~0.2.3"
 hex = "~0.4.3"
 mysql = { version = "~24.0.0", default-features = false, features = ["minimal"]}
-ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", branch="test" }
+ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
 #ocsp = {git = "https://github.com/maicallist/ocsp-rs.git" }
 pem-parser = {git = "https://github.com/yberreby/pem-parser-rs.git" }
 #openssl-sys = { version = "~0.9.103", features = ["vendored" ]}

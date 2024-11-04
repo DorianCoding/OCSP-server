@@ -1424,7 +1424,7 @@ dependencies = [
 [[package]]
 name = "ocsp"
 version = "0.4.0"
-source = "git+https://github.com/DorianCoding/ocsp-rs.git?branch=test#b95b0a44380437b6256b122782c07fd35ddabcec"
+source = "git+https://github.com/DorianCoding/ocsp-rs.git?tag=1.0.0#04c47f3dc91eebd4655e7c78ff21d1f18aeadcaf"
 dependencies = [
  "asn1_der",
  "chrono",
