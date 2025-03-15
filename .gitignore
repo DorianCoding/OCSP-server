@@ -1,8 +1,2 @@
 /target
-*_files/
-test.resp
-src/main_*.rs
-config.toml
 cache/
-src/test.py
-Rocket.toml
