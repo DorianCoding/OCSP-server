@@ -55,7 +55,7 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 Create your config file in the main directory and call `service.sh` as root. The service then will be started on bootup and will listen to connections.
 ### Binaries
-1) Get binaries for your architecture and execute it in the background (check [releases](/releases/latest)).
+1) Get binaries for your architecture and execute it in the background (check [releases](https://github.com/DorianCoding/OCSP-server/releases/tag/v0.4.0)).
 
 *Feel free to share binaries for others architectures in a PR so they can be added. Please post only optimized binaries (release).*
 ### Compile from source
