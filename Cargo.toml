@@ -1,6 +1,6 @@
 [package]
 name = "ocsp-server"
-authors = ["DorianCoding"]
+authors = ["DorianCoding <108593662+DorianCoding@users.noreply.github.com>"]
 description = "OCSP server, listening for requests to give responses."
 version = "0.4.0"
 edition = "2024"
