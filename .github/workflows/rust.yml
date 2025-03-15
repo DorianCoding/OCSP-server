@@ -63,7 +63,7 @@ jobs:
     - uses: actions/checkout@v4
     - uses: taiki-e/upload-rust-binary-action@v1
       with:
-        bin: OCSP_Server
+        bin: ocsp-server
         include: LICENSE,README.md
         target: ${{ matrix.target }}
         archive: $bin-$tag-$target
