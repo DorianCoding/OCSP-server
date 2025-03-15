@@ -2,9 +2,8 @@
 name = "ocsp-server"
 authors = ["DorianCoding"]
 description = "OCSP server, listening for requests to give responses."
-version = "0.3.0"
-edition = "2024"
-rust-version = "1.85"
+version = "0.4.0"
+edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/DorianCoding/OCSP_server"
 keywords = ["ocsp", "server", "ocsp-response"]
@@ -14,23 +13,29 @@ exclude = [
     "config.toml",
     "service.sh",
 ]
+
 [dependencies]
+clap = { version = "4.5.32", features = ["derive"] }
 chrono = { version = "~0.4.31", default-features = false, features = ["std"]}
 config-file = "~0.2.3"
 hex = "~0.4.3"
-mysql = { version = "~24.0.0", default-features = false, features = ["minimal"]}
+mysql = { version = "~26.0.0", default-features = false, features = ["minimal"]}
 ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
 #ocsp = {git = "https://github.com/maicallist/ocsp-rs.git" }
-pem-parser = {git = "https://github.com/yberreby/pem-parser-rs.git" }
+pem = "3.0.5"
 #openssl-sys = { version = "~0.9.103", features = ["vendored" ]}
-ring = "0.17.8"
+ring = "0.17.12"
 rocket = "~0.5.0"
 serde = "~1.0.193"
 x509-parser = "~0.16.0"
 zeroize = { version = "~1.7.0", features = ["std", "zeroize_derive"] }
+
 [profile.release]
 strip = "symbols"
+
 [lints.rust]
-unsafe_code = "warn"
+unsafe_code = "deny"
+unused_imports = "deny"
+
 [badges]
 maintenance = {status = "passively-maintained" }
