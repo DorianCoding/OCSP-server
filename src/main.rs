@@ -57,6 +57,8 @@ struct Cli {
 }
 
 const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
+const DEFAULT_PORT: u16 = 9000;
+const DEFAULT_TIMEOUT: u8 = 5;
 // In a real application, this would likely be more complex.
 #[derive(Debug)]
 struct Config {
@@ -88,8 +90,8 @@ struct Fileconfig {
     caching: Option<bool>,
     revocextended: Option<bool>,
     dbip: Option<String>,
-    port: u32,
-    timeout: u8,
+    port: Option<u16>,
+    timeout: Option<u8>,
     dbuser: String,
     dbpassword: String,
     dbname: String,
@@ -669,12 +671,7 @@ fn rocket() -> _ {
     let mut key = fs::read(&config.itkey).unwrap();
     let rsakey = getprivatekey(&key).unwrap();
     key.zeroize();
-    let port: u16 = match u16::try_from(config.port) {
-        Ok(n @ 1..=65535) => n,
-        _ => {
-            panic!("Invalid port number.")
-        }
-    };
+    let port = config.port.unwrap_or(DEFAULT_PORT);
     let config = Config {
         issuer_hash: (
             sha1key.as_ref().to_vec(),
@@ -684,7 +681,7 @@ fn rocket() -> _ {
         ),
         revocextended: config.revocextended.unwrap_or(false),
         cert: file2,
-        time: config.timeout,
+        time: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
         //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder,
