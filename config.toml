@@ -1,10 +1,11 @@
 #Config file, all fields are compulsory
 cachedays = 3
 dbip = "127.0.0.1"
-dbuser = "cert"
 port = 9000
-dbname = "certs"
+timeout = 10
+dbuser = "cert"
 dbpassword = "cert"
+dbname = "certs"
 cachefolder = "cache/"
-itcert = "/var/public_files/it_cert.crt"
-itkey = "/var/private_files/it_privkey.pem"
+itcert = "test_files/cert.pem"
+itkey = "test_files/keyp8.pk8"

@@ -2,7 +2,7 @@
 extern crate rocket;
 use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
-use clap::Parser;
+use clap::{crate_authors, Parser};
 use config_file::FromConfigFile;
 use mysql::prelude::Queryable;
 use mysql::*;
@@ -35,16 +35,24 @@ use std::time::Duration;
 use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
+#[derive(Parser, Debug)]
+#[clap(
+    author = crate_authors!("\n"),
+    before_help = "This script listens and answers to OCSP requests/response.",
+    after_help = "A config file is required for the script to work.",
+    help_template = "\
+    {name} {version}
+    Authors: {author-section}
+    {before-help}
+    About: {about-with-newline}
+    {usage-heading} {usage}
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[derive(Parser)]
-#[command(author = "DorianCoding")]
-#[command(name = "ocsp-server")]
-#[command(about = "OCSP server, listening for requests to give responses")]
-#[command(version = VERSION)]
+    {all-args}{after-help}
+    "
+)]
+#[command(version, author, about, long_about = None)]
 struct Cli {
-    #[arg(short = 'f', long = "config", default_value = "config.toml")]
+    #[arg(default_value = "config.toml")]
     config_path: String,
 }
 
@@ -581,7 +589,34 @@ fn pem_to_der(pem_str: &str) -> Vec<u8> {
         }
     }
 }
+#[test]
+#[should_panic(expected = "called `Result::unwrap()` on an `Err` value: KeyRejected(\"InvalidEncoding\")")]
+fn checkconfigfake() {
+    let cli = Cli::parse();
 
+    let config_path = &cli.config_path;
+
+    if !Path::new(config_path).exists() {
+        panic!("Config file not found at: {}", config_path);
+    }
+
+    let mut config = match Fileconfig::from_config_file(config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            panic!("Error reading config file at {}: {}", config_path, e);
+        }
+    };
+    config.itkey = String::from("test_files/key.pem");
+    //For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
+    //let issuer_name_hash = certpem.subject_name_hash();
+    let mut key = fs::read(&config.itkey).unwrap();
+    let _rsakey = getprivatekey(&key).unwrap();
+    key.zeroize();
+}
+#[test]
+fn checkconfig() {
+    rocket();
+}
 #[launch]
 fn rocket() -> _ {
     let cli = Cli::parse();
@@ -589,15 +624,13 @@ fn rocket() -> _ {
     let config_path = &cli.config_path;
 
     if !Path::new(config_path).exists() {
-        eprintln!("Config file not found at: {}", config_path);
-        std::process::exit(1);
+        panic!("Config file not found at: {}", config_path);
     }
 
     let config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Error reading config file at {}: {}", config_path, e);
-            std::process::exit(1);
+            panic!("Error reading config file at {}: {}", config_path, e);
         }
     };
 
