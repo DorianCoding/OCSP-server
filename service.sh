@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 if [ "$EUID" -ne 0 ]
   then echo "You need to be root to execute this script."
   exit
