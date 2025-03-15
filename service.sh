@@ -5,14 +5,19 @@ if [ "$EUID" -ne 0 ]
 fi
 if [ ! -f config.toml ]; then
     echo "Put the config.toml file in the main directory"
+    exit
+fi
+if [ ! -f target/release/ocsp-server ]; then
+    echo "Please execute cargo build --release before."
+    exit
 fi
 echo "Creating pycert user and group"
-adduser --system pycert
+adduser --system pycert --group
 if [ $? -ne 0 ]
   then echo "Error while creating the user, exiting"
   exit
 fi
-echo -n "Cancel the script now if you did not edit config.toml and change it now, else the script won't work"
+echo -n "Cancel the script by Ctrl+C now if you did not edit config.toml and change it now, else the script won't work"
 read -t 10
 echo "Creating cache directory"
 mkdir -p /var/ocsp/cache
@@ -21,17 +26,17 @@ if [ $? -ne 0 ]
   exit
 fi
 echo "Creating binaries"
-if [ `getconf LONG_BIT` = "64" ]
-then
-  cp binaries/linux-x86_64_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
-else
-  cp binaries/linux-x32_ocsp_server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/config.toml
-fi
+cp target/release/ocsp-server /var/ocsp/ocsp_server && cp config.toml /var/ocsp/
 if [ $? -ne 0 ]
-  then echo "Error copying files, exiting"
+  then echo "Error copying files, exiting. Please execute cargo build --release before."
   exit
 fi
-chmod 640 config.toml && chmod 750 ocsp_server && chown root:pycert /var/ocsp/ && chmod 750 /var/ocsp/
+cd /var/ocsp
+if [ $? -ne 0 ]
+  then echo "Error moving to /var/ocsp"
+  exit
+fi
+chmod 640 config.toml && cp chmod 750 ocsp_server && chown root:pycert /var/ocsp/ && chmod 750 /var/ocsp/
 if [ $? -ne 0 ]
   then echo "Error setting files, exiting"
   exit
