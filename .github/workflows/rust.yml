@@ -28,6 +28,7 @@ jobs:
         with:
           token: ${{ secrets.TOKEN }}
           generate_notes: true
+          title: Version $version
           overwrite: true
 
   upload-assets:
