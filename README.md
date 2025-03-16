@@ -32,7 +32,7 @@ cachedays = 3 #Number of days a response is valid once created (only for valid c
 dbip = "127.0.0.1" #Optional. IP to connect to MySql database. If absent, use of unix socket.
 timeout = 5 #Optional timeout, default 5s
 dbuser = "cert" #Username to connect to MySql database
-port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service)
+port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service). By default 9000
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
@@ -44,6 +44,7 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 > [!CAUTION]
 > Config.toml should be read-only for the script and inaccessible for others because it contains dbpassword.
+> Test files are TEST FILES and SHOULD NOT BE USED in any way for production.
 > Intermediate/Signer certificate key should be held secret, must be read-only for the script and inaccessible to anyone else. The intermediate/Signer certificate should be world-readonly, including to the script.
 > As a service, the script will use a brand-new user called pycert. This ensures system integrity and protection. All the filesystem is locked by systemd except the cache folder.
 > The responder will reply to any certificate that are present in the database, *whatever they are currently expired or not*.
@@ -54,12 +55,11 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 
 Create your config file in the main directory and call `service.sh` as root. The service then will be started on bootup and will listen to connections.
 ### Binaries
-1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
-2) Extract binaries for your architecture and execute it in the background.
+1) Get binaries for your architecture and execute it in the background (check [releases](https://github.com/DorianCoding/OCSP-server/releases/tag/v0.4.0)).
 
 *Feel free to share binaries for others architectures in a PR so they can be added. Please post only optimized binaries (release).*
 ### Compile from source
-1) Clone the repo `git clone https://github.com/DorianCoding/OCSP_MySql.git`
+1) Clone the repo `git clone https://github.com/DorianCoding/OCSP-server.git`
 2) Type `cargo run` or `cargo run --release` and enjoy 👍
 ## MySql table
 This script requires a table with this kind of structure :

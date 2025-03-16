@@ -64,7 +64,7 @@ jobs:
     - uses: taiki-e/upload-rust-binary-action@v1
       with:
         bin: ocsp-server
-        include: LICENSE,README.md
+        include: LICENSE,README.md,config.toml,service.sh
         target: ${{ matrix.target }}
         archive: $bin-$tag-$target
         tar: unix
