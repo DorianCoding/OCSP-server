@@ -1,7 +1,9 @@
 use clap::{crate_authors, Parser};
+use diesel::QueryableByName;
 use ocsp::common::asn1::Bytes;
 use serde::Deserialize;
 use zeroize::Zeroize;
+
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
@@ -26,14 +28,17 @@ pub(crate) struct Cli {
 pub(crate) const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 pub(crate) const DEFAULT_PORT: u16 = 9000;
 pub(crate) const DEFAULT_TIMEOUT: u8 = 5;
-// In a real application, this would likely be more complex.
+pub(crate) const DEFAULT_MYSQL_PORT: u16 = 3306;
+pub(crate) const DEFAULT_POSTGRES_PORT: u16 = 5432;
+pub(crate) const DEFAULT_MYSQL_TABLE: &str = "list_certs";
+pub(crate) const DEFAULT_POSTGRES_TABLE: &str = "ocsp_list_certs";
+
 #[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) issuer_hash: (Vec<u8>, Vec<u8>, bool),
     pub(crate) cert: Bytes,
     pub(crate) revocextended: bool,
     pub(crate) time: u8,
-    //issuer_name_hash: u32,
     pub(crate) rsakey: ring::signature::RsaKeyPair,
     pub(crate) cachedays: u16,
     pub(crate) caching: bool,
@@ -41,8 +46,16 @@ pub(crate) struct Config {
     pub(crate) dbuser: String,
     pub(crate) dbpassword: String,
     pub(crate) dbname: String,
+    pub(crate) db_type: String,
+    pub(crate) dbport: Option<u16>,
+    pub(crate) create_table: bool,
     pub(crate) cachefolder: String,
+    pub(crate) table_name: Option<String>,
 }
+
+// Don't implement Default for Config, because we can't easily create a dummy RsaKeyPair.
+// We'll use explicit constructors in tests instead.
+
 impl Drop for Config {
     fn drop(&mut self) {
         self.dbip.zeroize();
@@ -51,6 +64,7 @@ impl Drop for Config {
         self.dbname.zeroize();
     }
 }
+
 #[derive(Deserialize)]
 pub(crate) struct Fileconfig {
     pub(crate) cachedays: u16,
@@ -62,21 +76,50 @@ pub(crate) struct Fileconfig {
     pub(crate) dbuser: String,
     pub(crate) dbpassword: String,
     pub(crate) dbname: String,
+    pub(crate) db_type: Option<String>,
+    pub(crate) dbport: Option<u16>,
+    pub(crate) create_table: Option<bool>,
     pub(crate) cachefolder: String,
     pub(crate) itkey: String,
     pub(crate) itcert: String,
+    pub(crate) table_name: Option<String>,
 }
+
 impl Drop for Fileconfig {
     fn drop(&mut self) {
         self.dbip.zeroize();
         self.dbuser.zeroize();
         self.dbpassword.zeroize();
         self.dbname.zeroize();
+        self.itkey.zeroize();
     }
 }
+
 #[derive(Debug, PartialEq, Clone)]
+#[allow(dead_code)]
 pub(crate) struct Certinfo {
     pub(crate) status: String,
-    pub(crate) revocation_time: Option<mysql::Value>,
+    pub(crate) revocation_time: Option<chrono::NaiveDateTime>,
     pub(crate) revocation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, QueryableByName)]
+pub(crate) struct CertRecord {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub(crate) cert_num: String,
+
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamp>)]
+    pub(crate) revocation_time: Option<chrono::NaiveDateTime>,
+
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    pub(crate) revocation_reason: Option<String>,
+
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub(crate) status: String,
+}
+
+#[derive(Debug, QueryableByName)]
+pub(crate) struct BoolResult {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    pub(crate) exists: bool,
 }

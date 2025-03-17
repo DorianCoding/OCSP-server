@@ -1,11 +1,17 @@
 #Config file, all fields are compulsory
 cachedays = 3
+db_type = "mysql" # Can be "mysql" or "postgres"
 dbip = "127.0.0.1"
+dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 port = 9000
 timeout = 10
-dbuser = "cert"
-dbpassword = "cert"
+dbuser = "ocsp"
+dbpassword = "ocsp"
 dbname = "certs"
 cachefolder = "cache/"
 itcert = "test_files/cert.pem"
-itkey = "test_files/keyp8.pk8"
+itkey = "test_files/key.pem" # Supports PKCS#8, PEM PKCS#1 (RSA) formats
+revocextended = false # Optional, if you want to enable EXTENDED_REVOCATION
+caching = false # Optional, enable caching or enable nonce response.
+create_table = true # Optional: Creates the table if it doesn't exist
+table_name = "custom_certs" # Optional: Custom table name (default is list_certs for MySQL, ocsp_list_certs for PostgreSQL)

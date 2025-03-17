@@ -1,11 +1,10 @@
-#[macro_use]
 extern crate rocket;
+
 use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
 use clap::Parser;
 use config_file::FromConfigFile;
-use mysql::prelude::Queryable;
-use mysql::*;
+use log::{debug, error, info, trace, warn};
 use ocsp::common::asn1::Bytes;
 use ocsp::common::ocsp::{OcspExt, OcspExtI};
 use ocsp::request::OcspRequest;
@@ -14,11 +13,12 @@ use ocsp::{
     err::OcspError,
     oid::{ALGO_SHA256_WITH_RSA_ENCRYPTION_DOT, OCSP_RESPONSE_BASIC_DOT},
     response::{
-        BasicResponse, CertStatus as OcspCertStatus, CertStatus, CertStatusCode, CrlReason,
-        OcspRespStatus, OcspResponse, OneResp, ResponderId, ResponseBytes, ResponseData,
-        RevokedInfo,
+        BasicResponse, CertStatus, CertStatusCode, OcspRespStatus, OcspResponse, OneResp,
+        ResponderId, ResponseBytes, ResponseData,
     },
 };
+use openssl::pkey::PKey;
+use openssl::rsa::Rsa;
 use pem::parse;
 use r#struct::*;
 use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
@@ -26,19 +26,25 @@ use ring::{rand, signature};
 use rocket::http::ContentType;
 use rocket::State;
 use rocket::{data::ToByteUnit, Data};
+use rocket::{get, launch, post, routes};
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
 use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
+
+mod database;
 mod r#struct;
+
+use database::Database;
+
 fn signresponse(
     issuer_hash: &[u8],
-    private_key: &ring::rsa::KeyPair,
+    private_key: &ring::signature::RsaKeyPair,
     response: Vec<OneResp>,
     extensions: Option<Vec<OcspExtI>>,
     cert: Option<Vec<Bytes>>,
@@ -61,95 +67,17 @@ fn signresponse(
     let bytes = ResponseBytes::new_basic(resp_type, basic)?;
     Ok(bytes)
 }
+
 fn signvalidresponse(bytes: ResponseBytes) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_success(bytes);
     ocsp.to_der()
 }
+
 fn signnonvalidresponse(motif: OcspRespStatus) -> Result<Vec<u8>, OcspError> {
     let ocsp = OcspResponse::new_non_success(motif)?;
     ocsp.to_der()
 }
-fn checkcert(
-    config: &State<Config>,
-    certnum: &str,
-    revoked: bool,
-) -> Result<OcspCertStatus, mysql::Error> {
-    // Let's select payments from database. Type inference should do the trick here.
-    let opts = OptsBuilder::new()
-        .user(Some(config.dbuser.as_str()))
-        .read_timeout(Some(Duration::new(config.time as u64, 0)))
-        .db_name(Some(config.dbname.as_str()))
-        .pass(Some(config.dbpassword.as_str()));
-    let opts = match &config.dbip {
-        Some(string) => opts.ip_or_hostname(Some(string)),
-        None => opts
-            .prefer_socket(true)
-            .socket(Some("/run/mysqld/mysqld.sock")),
-    };
-    let mut conn = Conn::new(opts)?;
-    let status = conn.exec_map(
-        "SELECT status, revocation_time, revocation_reason FROM list_certs WHERE cert_num=?",
-        (String::from(certnum).into_bytes(),),
-        |(status, revocation_time, revocation_reason)| Certinfo {
-            status,
-            revocation_time,
-            revocation_reason,
-        },
-    )?;
-    if status.is_empty() {
-        warn!("Entry not found for cert {}", certnum);
-        if !revoked {
-            Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
-        } else {
-            Ok(OcspCertStatus::new(
-                CertStatusCode::Revoked,
-                Some(RevokedInfo::new(
-                    GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
-                    Some(CrlReason::OcspRevokeCertHold),
-                )),
-            ))
-        }
-    } else {
-        let statut = status[0].clone();
-        debug!("Entry found for cert {}, status {}", certnum, statut.status);
-        if statut.status == "Revoked" {
-            let time = GeneralizedTime::now();
-            let date = &statut.revocation_time;
-            let timenew = match date {
-                Some(mysql::Value::Date(year, month, day, hour, min, sec, _ms)) => {
-                    GeneralizedTime::new(
-                        i32::from(*year),
-                        u32::from(*month),
-                        u32::from(*day),
-                        u32::from(*hour),
-                        u32::from(*min),
-                        u32::from(*sec),
-                    )
-                }
-                _ => Ok(time),
-            };
-            let time = timenew.unwrap_or(time);
-            let motif = statut.revocation_reason.unwrap_or_default();
-            let motif: CrlReason = match motif.as_str() {
-                "key_compromise" => CrlReason::OcspRevokeKeyCompromise,
-                "ca_compromise" => CrlReason::OcspRevokeCaCompromise,
-                "affiliation_changed" => CrlReason::OcspRevokeAffChanged,
-                "superseded" => CrlReason::OcspRevokeSuperseded,
-                "cessation_of_operation" => CrlReason::OcspRevokeCessOperation,
-                "certificate_hold" => CrlReason::OcspRevokeCertHold,
-                "privilege_withdrawn" => CrlReason::OcspRevokePrivWithdrawn,
-                "aa_compromise" => CrlReason::OcspRevokeAaCompromise,
-                _ => CrlReason::OcspRevokeUnspecified,
-            };
-            Ok(OcspCertStatus::new(
-                CertStatusCode::Revoked,
-                Some(RevokedInfo::new(time, Some(motif))),
-            ))
-        } else {
-            Ok(OcspCertStatus::new(CertStatusCode::Good, None))
-        }
-    }
-}
+
 fn createocspresponse(
     cert: CertId,
     cert_status: CertStatus,
@@ -183,7 +111,8 @@ fn createocspresponse(
         one_resp_ext: extension,
     })
 }
-fn checkcache(state: &State<Config>, certname: &str) -> io::Result<Option<Vec<u8>>> {
+
+fn checkcache(state: &State<Arc<Config>>, certname: &str) -> io::Result<Option<Vec<u8>>> {
     let paths = fs::read_dir(&state.cachefolder)?;
     for path in paths {
         let path = path?.path();
@@ -193,7 +122,7 @@ fn checkcache(state: &State<Config>, certname: &str) -> io::Result<Option<Vec<u8
             .to_str()
             .unwrap_or_default();
         if filename.starts_with(certname) {
-            let elem: Vec<&str> = filename.split(&certname).collect();
+            let elem: Vec<&str> = filename.split(certname).collect();
             if elem.len() != 2 {
                 warn!("Invalid filename to check cache: {}", filename);
                 continue;
@@ -226,8 +155,9 @@ fn checkcache(state: &State<Config>, certname: &str) -> io::Result<Option<Vec<u8
     }
     Ok(None)
 }
+
 fn addtocache(
-    state: &State<Config>,
+    state: &State<Arc<Config>>,
     certnum: &str,
     maxdate: DateTime<FixedOffset>,
     response: &[u8],
@@ -241,17 +171,21 @@ fn addtocache(
     let path = Path::new(&long);
     fs::write(path, response)
 }
+
 #[post("/<_..>", data = "<data>")]
 async fn upload2(
-    config: &State<Config>,
+    config: &State<Arc<Config>>,
+    db: &State<Box<dyn Database>>,
     data: Data<'_>,
     address: SocketAddr,
 ) -> io::Result<(ContentType, Vec<u8>)> {
-    upload(config, data, address).await
+    upload(config, db, data, address).await
 }
+
 #[get("/<_..>", data = "<data>")]
 async fn upload(
-    state: &State<Config>,
+    state: &State<Arc<Config>>,
+    db: &State<Box<dyn Database>>,
     data: Data<'_>,
     address: SocketAddr,
 ) -> io::Result<(ContentType, Vec<u8>)> {
@@ -352,7 +286,8 @@ async fn upload(
             };
             extensions.push(revoked);
         };
-        //Compare that signing certificate is signed by the issuer or the issuer itself https://www.rfc-editor.org/rfc/rfc6960
+
+        // Compare that signing certificate is signed by the issuer or the issuer itself https://www.rfc-editor.org/rfc/rfc6960
         let status = match (
             cert.issuer_key_hash == state.issuer_hash.0,
             state.issuer_hash.1 == cert.issuer_key_hash,
@@ -365,10 +300,11 @@ async fn upload(
                 } else {
                     trace!("Certificate is the issuer.");
                 }
-                match checkcert(state, &num, state.revocextended) {
+
+                match db.check_cert(&num, state.revocextended).await {
                     Ok(status) => status,
-                    Err(default) => {
-                        error!("Cannot connect to database: {}", default.to_string());
+                    Err(err) => {
+                        error!("Cannot query database: {}", err);
                         return Ok((
                             custom,
                             signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
@@ -396,11 +332,7 @@ async fn upload(
                 CertStatus::new(CertStatusCode::Unknown, None)
             }
         };
-        /* let mut extension = OcspExtI {
-            id: i2b_oid(ocsp::common::asn1::Oid::new_from_dot(OCSP_EXT_EXTENDED_REVOKE_DOT)),
-            ext: ocsp::common::ocsp::OcspExt::CrlRef { url: None, num: Some(OCSP_EXT_EXTENDED_REVOKE_HEX.to_vec()), time: None }
-        };
-        let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, Some(vec![extension])); */
+
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
             error!("Error creating OCSP response.");
@@ -456,9 +388,9 @@ async fn upload(
     let response = response.unwrap();
     if possible {
         let date = chrono::Local::now();
-        let date = date.checked_add_days(chrono::Days::new(state.cachedays.into())); //TODO: Implement
-        if date.is_some() {
-            match addtocache(state, &certnum, date.unwrap().fixed_offset(), &response) {
+        let date = date.checked_add_days(chrono::Days::new(u64::from(state.cachedays)));
+        if let Some(date) = date {
+            match addtocache(state, &certnum, date.fixed_offset(), &response) {
                 Ok(_) => (),
                 Err(_) => {
                     warn!("Cannot write to cache");
@@ -469,11 +401,52 @@ async fn upload(
     info!("Send response for {} to {}", &certnum, address.ip());
     Ok((custom, response))
 }
-fn getprivatekey<T>(data: T) -> Result<ring::rsa::KeyPair, ring::error::KeyRejected>
+
+fn getprivatekey<T>(data: T) -> Result<ring::signature::RsaKeyPair, String>
 where
     T: AsRef<[u8]>,
 {
-    ring::rsa::KeyPair::from_pkcs8(data.as_ref())
+    if let Ok(key_pair) = ring::signature::RsaKeyPair::from_pkcs8(data.as_ref()) {
+        return Ok(key_pair);
+    }
+
+    let pem_str = String::from_utf8_lossy(data.as_ref());
+
+    if pem_str.contains("-----BEGIN RSA PRIVATE KEY-----") {
+        match convert_rsa_pem_to_pkcs8(&pem_str) {
+            Ok(pkcs8_der) => match ring::signature::RsaKeyPair::from_pkcs8(&pkcs8_der) {
+                Ok(key_pair) => return Ok(key_pair),
+                Err(e) => {
+                    return Err(format!(
+                        "Error creating KeyPair from converted PKCS#8: {}",
+                        e
+                    ))
+                }
+            },
+            Err(e) => return Err(format!("RSA PEM conversion error: {}", e)),
+        }
+    } else if pem_str.contains("-----BEGIN PRIVATE KEY-----") {
+        match pem::parse(pem_str.as_bytes()) {
+            Ok(pem) => match ring::signature::RsaKeyPair::from_pkcs8(pem.contents()) {
+                Ok(key_pair) => return Ok(key_pair),
+                Err(e) => return Err(format!("Error creating KeyPair from PEM PKCS#8: {}", e)),
+            },
+            Err(e) => return Err(format!("PEM parsing error: {}", e)),
+        }
+    } else if pem_str.contains("-----BEGIN EC PRIVATE KEY-----") {
+        return Err("EC key format is not supported".to_string());
+    }
+
+    Err("Unsupported key format".to_string())
+}
+
+fn convert_rsa_pem_to_pkcs8(
+    pem_str: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let pem = pem::parse(pem_str.as_bytes())?;
+    let rsa = Rsa::private_key_from_der(pem.contents())?;
+    let pkey = PKey::from_rsa(rsa)?;
+    Ok(pkey.private_key_to_pkcs8()?)
 }
 
 fn pem_to_der(pem_str: &str) -> Vec<u8> {
@@ -485,8 +458,9 @@ fn pem_to_der(pem_str: &str) -> Vec<u8> {
         }
     }
 }
+
 #[launch]
-fn rocket() -> _ {
+fn rocket() -> rocket::Rocket<rocket::Build> {
     let cli = Cli::parse();
 
     let config_path = &cli.config_path;
@@ -519,7 +493,7 @@ fn rocket() -> _ {
             "Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response."
         )
     }
-    //let subjectkey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
+
     let parsed = certpem
         .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
         .unwrap()
@@ -531,26 +505,50 @@ fn rocket() -> _ {
             panic!("Error getting key");
         }
     };
-    //For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
+
+    // For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
     let authoritykey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
     let certpempublickey = &certpem.public_key().subject_public_key.data;
     let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey);
-    //let issuer_name_hash = certpem.subject_name_hash();
-    let mut key = fs::read(&config.itkey).unwrap();
-    let rsakey = getprivatekey(&key).unwrap();
+
+    // Read private key and zero it after use
+    let mut key = fs::read(&config.itkey).unwrap_or_else(|e| {
+        panic!("Error reading key file: {}", e);
+    });
+
+    let rsakey = match getprivatekey(&key) {
+        Ok(key_pair) => key_pair,
+        Err(e) => {
+            eprintln!("Error loading private key: {}", e);
+            eprintln!("Supported formats: PKCS#8, PEM PKCS#1 (RSA)");
+            panic!("Key loading failed");
+        }
+    };
     key.zeroize();
+
+    // Get HTTP port
     let port = config.port.unwrap_or(DEFAULT_PORT);
-    let config = Config {
+
+    // Determine database type and default port
+    let db_type = config
+        .db_type
+        .clone()
+        .unwrap_or_else(|| "mysql".to_string());
+    let dbport = match db_type.as_str() {
+        "postgres" | "postgresql" => config.dbport.or(Some(DEFAULT_POSTGRES_PORT)),
+        _ => config.dbport.or(Some(DEFAULT_MYSQL_PORT)),
+    };
+
+    // Create configuration
+    let config = Arc::new(Config {
         issuer_hash: (
             sha1key.as_ref().to_vec(),
-            //hex::decode(subjectkey).unwrap(),
             hex::decode(authoritykey).unwrap(),
             isocsp,
         ),
         revocextended: config.revocextended.unwrap_or(false),
         cert: file2,
         time: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
-        //issuer_name_hash,
         rsakey,
         cachefolder: config.cachefolder.clone(),
         caching: config.caching.unwrap_or(true),
@@ -559,94 +557,35 @@ fn rocket() -> _ {
         dbuser: config.dbuser.clone(),
         dbpassword: config.dbpassword.clone(),
         dbname: config.dbname.clone(),
+        db_type,
+        dbport,
+        create_table: config.create_table.unwrap_or(false),
+        table_name: config.table_name.clone(),
+    });
+
+    // Create database connection and tables if needed
+    let db = match database::create_database(config.clone()) {
+        Ok(db) => {
+            if let Err(e) = db.create_tables_if_needed() {
+                eprintln!("Error creating tables: {}", e);
+            }
+            db
+        }
+        Err(e) => {
+            panic!("Failed to initialize database: {}", e);
+        }
     };
+
+    // Create cache folder if it doesn't exist
     let path = Path::new(config.cachefolder.as_str());
     if !path.exists() {
         fs::create_dir_all(path).expect("Cannot create cache folder");
     }
+
     rocket::build()
         .configure(rocket::Config::figment().merge(("port", port)))
         .mount("/", routes![upload])
         .mount("/", routes![upload2])
         .manage(config)
-}
-#[cfg(test)]
-mod tests {
-    use crate::rocket;
-    use crate::Cli;
-    use crate::{getprivatekey, Fileconfig};
-    use clap::Parser;
-    use config_file::FromConfigFile;
-    use ring::rand::SecureRandom;
-    use ring::signature::KeyPair;
-    use ring::{rand, signature};
-    use std::path::Path;
-    use std::{fs, time::Instant};
-    use zeroize::Zeroize;
-    #[test]
-    fn testresponse() {
-        println!("Generating key, may take a while...");
-        let rng = rand::SystemRandom::new();
-        let pkcs8_bytes = signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-
-        // Normally the application would store the PKCS#8 file persistently. Later
-        // it would read the PKCS#8 file from persistent storage to use it.
-
-        let key_pair = signature::Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-
-        println!("Done.");
-        let mut tosign = [0u8; 3000];
-        println!("Generating random");
-        rng.fill(&mut tosign).unwrap();
-        println!("Done!");
-        let time = Instant::now();
-        for i in 0..100 {
-            if i % 10 == 0 {
-                rng.fill(&mut tosign).unwrap();
-            }
-            let sig = key_pair.sign(&tosign);
-            // Normally an application would extract the bytes of the signature and
-            // send them in a protocol message to the peer(s). Here we just get the
-            // public key key directly from the key pair.
-            let peer_public_key_bytes = key_pair.public_key().as_ref();
-
-            // Verify the signature of the message using the public key. Normally the
-            // verifier of the message would parse the inputs to this code out of the
-            // protocol message(s) sent by the signer.
-            let peer_public_key =
-                signature::UnparsedPublicKey::new(&signature::ED25519, peer_public_key_bytes);
-            peer_public_key.verify(&tosign, sig.as_ref()).unwrap();
-        }
-        println!("Elapsed time : {:.6} ms", time.elapsed().as_millis());
-    }
-    #[test]
-    #[should_panic(
-        expected = "called `Result::unwrap()` on an `Err` value: KeyRejected(\"InvalidEncoding\")"
-    )]
-    fn checkconfigfake() {
-        let cli = Cli::parse();
-
-        let config_path = &cli.config_path;
-
-        if !Path::new(config_path).exists() {
-            panic!("Config file not found at: {}", config_path);
-        }
-
-        let mut config = match Fileconfig::from_config_file(config_path) {
-            Ok(config) => config,
-            Err(e) => {
-                panic!("Error reading config file at {}: {}", config_path, e);
-            }
-        };
-        config.itkey = String::from("test_files/key.pem");
-        //For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
-        //let issuer_name_hash = certpem.subject_name_hash();
-        let mut key = fs::read(&config.itkey).unwrap();
-        let _rsakey = getprivatekey(&key).unwrap();
-        key.zeroize();
-    }
-    #[test]
-    fn checkconfig() {
-        rocket();
-    }
+        .manage(db as Box<dyn Database>)
 }

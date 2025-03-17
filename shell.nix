@@ -7,6 +7,11 @@ pkgs.mkShell {
     cargo-audit
     rustfmt
     rust-analyzer
+    git
+    openssl
+    libmysqlclient
+    postgresql
+    pkg-config
   ];
 
   shellHook = ''
