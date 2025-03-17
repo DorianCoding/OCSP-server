@@ -1,7 +1,7 @@
-use clap::{Parser, crate_authors};
+use clap::{crate_authors, Parser};
 use ocsp::common::asn1::Bytes;
-use zeroize::Zeroize;
 use serde::Deserialize;
+use zeroize::Zeroize;
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
