@@ -37,6 +37,7 @@ use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
 
+mod api;
 mod database;
 mod r#struct;
 
@@ -433,11 +434,9 @@ where
             },
             Err(e) => return Err(format!("PEM parsing error: {}", e)),
         }
-    } else if pem_str.contains("-----BEGIN EC PRIVATE KEY-----") {
-        return Err("EC key format is not supported".to_string());
     }
 
-    Err("Unsupported key format".to_string())
+    Err("Unsupported key format. Only RSA keys are supported per RFC 6960".to_string())
 }
 
 fn convert_rsa_pem_to_pkcs8(
@@ -561,6 +560,8 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         dbport,
         create_table: config.create_table.unwrap_or(false),
         table_name: config.table_name.clone(),
+        api_keys: config.api_keys.clone(),
+        enable_api: config.enable_api.unwrap_or(false),
     });
 
     // Create database connection and tables if needed
@@ -582,10 +583,24 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         fs::create_dir_all(path).expect("Cannot create cache folder");
     }
 
-    rocket::build()
+    // Create rocket instance with routes
+    let mut rocket_builder = rocket::build()
         .configure(rocket::Config::figment().merge(("port", port)))
         .mount("/", routes![upload])
         .mount("/", routes![upload2])
-        .manage(config)
-        .manage(db as Box<dyn Database>)
+        .manage(config.clone())
+        .manage(db as Box<dyn Database>);
+
+    // Add API routes if enabled
+    if config.enable_api {
+        info!("API functionality is enabled");
+        if config.api_keys.is_none() || config.api_keys.as_ref().unwrap().is_empty() {
+            warn!("API is enabled but no API keys are configured - this is insecure");
+        }
+        rocket_builder = rocket_builder.mount("/api", api::api_routes());
+    } else {
+        info!("API functionality is disabled");
+    }
+
+    rocket_builder
 }

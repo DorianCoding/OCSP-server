@@ -43,6 +43,9 @@ itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, k
 revocextended = true #Optional, if you want to enable EXTENDED_REVOCATION
 caching = true #Optional, enable caching or enable nonce response.
 create_table = true # Optional: Creates the table if it doesn't exist
+table_name = "custom_certs" # Optional: Custom table name (default is list_certs for MySQL, ocsp_list_certs for PostgreSQL)
+enable_api = true # Optional: Enable the certificate management API
+api_keys = ["secure-api-key-1", "secure-api-key-2"] # Optional: List of valid API keys for authentication
 ```
 
 > [!CAUTION]
@@ -67,7 +70,7 @@ Create your config file in the main directory and call `service.sh` as root. The
 ## MySql table
 This script requires a table with this kind of structure :
 ```
-CREATE TABLE `ocsp_list_certs` (
+CREATE TABLE `list_certs` (
   `cert_num` varchar(50) NOT NULL,
   `revocation_time` datetime DEFAULT NULL,
   `revocation_reason` enum('unspecified','key_compromise','ca_compromise','affiliation_changed','superseded','cessation_of_operation','certificate_hold','privilege_withdrawn','aa_compromise') DEFAULT NULL,

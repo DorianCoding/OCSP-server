@@ -17,7 +17,7 @@ exclude = [
 
 [dependencies]
 clap = { version = "4.5.32", features = ["derive", "cargo"] }
-chrono = { version = "~0.4.40", default-features = false, features = ["std"]}
+chrono = { version = "~0.4.40", default-features = false, features = ["std", "serde"] }
 config-file = "~0.2.3"
 serde = "~1.0.219"
 diesel = { version = "2.2.8", features = ["mysql", "postgres", "r2d2", "chrono"] }

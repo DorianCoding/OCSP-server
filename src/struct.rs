@@ -1,7 +1,8 @@
+use chrono::NaiveDateTime;
 use clap::{crate_authors, Parser};
 use diesel::QueryableByName;
 use ocsp::common::asn1::Bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 #[derive(Parser, Debug)]
@@ -51,6 +52,8 @@ pub(crate) struct Config {
     pub(crate) create_table: bool,
     pub(crate) cachefolder: String,
     pub(crate) table_name: Option<String>,
+    pub(crate) api_keys: Option<Vec<String>>,
+    pub(crate) enable_api: bool,
 }
 
 // Don't implement Default for Config, because we can't easily create a dummy RsaKeyPair.
@@ -83,6 +86,8 @@ pub(crate) struct Fileconfig {
     pub(crate) itkey: String,
     pub(crate) itcert: String,
     pub(crate) table_name: Option<String>,
+    pub(crate) api_keys: Option<Vec<String>>,
+    pub(crate) enable_api: Option<bool>,
 }
 
 impl Drop for Fileconfig {
@@ -91,7 +96,6 @@ impl Drop for Fileconfig {
         self.dbuser.zeroize();
         self.dbpassword.zeroize();
         self.dbname.zeroize();
-        self.itkey.zeroize();
     }
 }
 
@@ -122,4 +126,30 @@ pub(crate) struct CertRecord {
 pub(crate) struct BoolResult {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     pub(crate) exists: bool,
+}
+
+// API Authentication
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ApiKey(pub String);
+
+// API Request and Response Structures
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CertificateRequest {
+    pub cert_num: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RevocationRequest {
+    pub cert_num: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_time: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CertificateResponse {
+    pub cert_num: String,
+    pub status: String,
+    pub message: String,
 }

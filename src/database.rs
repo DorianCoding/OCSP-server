@@ -1,9 +1,9 @@
 use crate::r#struct::{
-    BoolResult, CertRecord, Config, DEFAULT_MYSQL_PORT, DEFAULT_MYSQL_TABLE, DEFAULT_POSTGRES_PORT,
-    DEFAULT_POSTGRES_TABLE,
+    BoolResult, CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_MYSQL_PORT,
+    DEFAULT_MYSQL_TABLE, DEFAULT_POSTGRES_PORT, DEFAULT_POSTGRES_TABLE,
 };
 use async_trait::async_trait;
-use chrono::{Datelike, Timelike};
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::sql_types;
@@ -49,6 +49,26 @@ pub trait Database: Send + Sync {
     ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>>;
 
     fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+    // New API-related methods
+    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+    async fn revoke_certificate(
+        &self,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+    async fn get_certificate_status(
+        &self,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>>;
+
+    async fn list_certificates(
+        &self,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>>;
 }
 
 pub struct DieselMysqlDatabase {
@@ -221,6 +241,179 @@ impl Database for DieselMysqlDatabase {
             self.table_name
         );
         Ok(())
+    }
+
+    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = self.pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Check if certificate already exists
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query.clone())
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if exists {
+                return Err("Certificate already exists".into());
+            }
+
+            // Insert new certificate
+            let insert_query = format!(
+                "INSERT INTO {} (cert_num, status) VALUES (?, 'Valid')",
+                table_name
+            );
+
+            diesel::sql_query(insert_query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke_certificate(
+        &self,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let now = chrono::Utc::now().naive_utc();
+        if revocation_time > now {
+            return Err("Revocation time cannot be in the future".into());
+        }
+
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let reason = reason.to_string();
+        let connection_manager = self.pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Check if certificate exists
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query.clone())
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if !exists {
+                return Err("Certificate does not exist".into());
+            }
+
+            // Update certificate status
+            let update_query = format!(
+                "UPDATE {} SET status = 'Revoked', revocation_time = ?, revocation_reason = ? WHERE cert_num = ?",
+                table_name
+            );
+
+            diesel::sql_query(update_query)
+                .bind::<sql_types::Timestamp, _>(&revocation_time)
+                .bind::<sql_types::Text, _>(&reason)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        }).await?
+    }
+
+    async fn get_certificate_status(
+        &self,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = self.pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Query certificate status
+            let query = format!(
+                "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let records = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<CertRecord>(&mut conn)?;
+
+            if records.is_empty() {
+                return Err("Certificate not found".into());
+            }
+
+            let record = &records[0];
+
+            Ok(Certinfo {
+                status: record.status.clone(),
+                revocation_time: record.revocation_time,
+                revocation_reason: record.revocation_reason.clone(),
+            })
+        }).await??;
+
+        Ok(result)
+    }
+
+    async fn list_certificates(
+        &self,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let status_filter = status.map(|s| s.to_string());
+        let connection_manager = self.pool.clone();
+
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+                let mut conn = connection_manager.get()?;
+
+                // Build query based on status filter (MySQL)
+                let query = match &status_filter {
+                    Some(_s) => format!(
+                        "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE status = ?",
+                        table_name
+                    ),
+                    None => format!("SELECT cert_num, status, revocation_time, revocation_reason FROM {}", table_name),
+                };
+
+                // Execute query with or without filter
+                let records: Vec<CertRecord> = if let Some(s) = &status_filter {
+                    diesel::sql_query(query)
+                        .bind::<sql_types::Text, _>(s)
+                        .load::<CertRecord>(&mut conn)?
+                } else {
+                    diesel::sql_query(query).load::<CertRecord>(&mut conn)?
+                };
+
+                // Convert to response format
+                let responses = records
+                    .into_iter()
+                    .map(|record| CertificateResponse {
+                        cert_num: record.cert_num,
+                        status: record.status,
+                        message: String::new(),
+                    })
+                    .collect();
+
+                Ok(responses)
+            },
+        )
+        .await??;
+
+        Ok(result)
     }
 }
 
@@ -436,6 +629,182 @@ impl Database for DieselPgDatabase {
         );
         Ok(())
     }
+
+    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = self.pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Check if certificate already exists
+            let query = format!(
+                "SELECT EXISTS (SELECT 1 FROM {} WHERE cert_num = $1) as exists",
+                table_name
+            );
+
+            let exists_results = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<BoolResult>(&mut conn)?;
+
+            let exists = !exists_results.is_empty() && exists_results[0].exists;
+
+            if exists {
+                return Err("Certificate already exists".into());
+            }
+
+            // Insert new certificate
+            let insert_query = format!(
+                "INSERT INTO {} (cert_num, status) VALUES ($1, 'Valid')",
+                table_name
+            );
+
+            diesel::sql_query(insert_query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke_certificate(
+        &self,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let now = chrono::Utc::now().naive_utc();
+        if revocation_time > now {
+            return Err("Revocation time cannot be in the future".into());
+        }
+
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let reason = reason.to_string();
+        let connection_manager = self.pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Check if certificate exists
+            let query = format!(
+                "SELECT EXISTS (SELECT 1 FROM {} WHERE cert_num = $1) as exists",
+                table_name
+            );
+
+            let exists_results = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<BoolResult>(&mut conn)?;
+
+            let exists = !exists_results.is_empty() && exists_results[0].exists;
+
+            if !exists {
+                return Err("Certificate does not exist".into());
+            }
+
+            // Update certificate status
+            // For PostgreSQL, we need to cast the text to the enum type
+            let update_query = format!(
+                "UPDATE {} SET status = 'Revoked', revocation_time = $1, revocation_reason = $2::revocation_reason_enum WHERE cert_num = $3",
+                table_name
+            );
+
+            diesel::sql_query(update_query)
+                .bind::<sql_types::Timestamp, _>(&revocation_time)
+                .bind::<sql_types::Text, _>(&reason)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        }).await?
+    }
+
+    async fn get_certificate_status(
+        &self,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = self.pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Query certificate status
+            let query = format!(
+                "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = $1",
+                table_name
+            );
+
+            let records = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<CertRecord>(&mut conn)?;
+
+            if records.is_empty() {
+                return Err("Certificate not found".into());
+            }
+
+            let record = &records[0];
+
+            Ok(Certinfo {
+                status: record.status.clone(),
+                revocation_time: record.revocation_time,
+                revocation_reason: record.revocation_reason.clone(),
+            })
+        }).await??;
+
+        Ok(result)
+    }
+
+    async fn list_certificates(
+        &self,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let status_filter = status.map(|s| s.to_string());
+        let connection_manager = self.pool.clone();
+
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+                let mut conn = connection_manager.get()?;
+
+                // Build query based on status filter (PostgreSQL)
+                let query = match &status_filter {
+                    Some(_s) => format!(
+                        "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE status = $1::cert_status",
+                        table_name
+                    ),
+                    None => format!("SELECT cert_num, status, revocation_time, revocation_reason FROM {}", table_name),
+                };
+
+                // Execute query with or without filter
+                let records: Vec<CertRecord> = if let Some(s) = &status_filter {
+                    diesel::sql_query(query)
+                        .bind::<sql_types::Text, _>(s)
+                        .load::<CertRecord>(&mut conn)?
+                } else {
+                    diesel::sql_query(query).load::<CertRecord>(&mut conn)?
+                };
+
+                // Convert to response format
+                let responses = records
+                    .into_iter()
+                    .map(|record| CertificateResponse {
+                        cert_num: record.cert_num,
+                        status: record.status,
+                        message: String::new(),
+                    })
+                    .collect();
+
+                Ok(responses)
+            },
+        )
+        .await??;
+
+        Ok(result)
+    }
 }
 
 pub fn create_database(
@@ -456,7 +825,6 @@ pub fn create_database(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockall::predicate::*;
     use mockall::*;
 
     mock! {
@@ -471,6 +839,22 @@ mod tests {
             ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>>;
 
             fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+            async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+            async fn revoke_certificate(
+                &self,
+                cert_num: &str,
+                revocation_time: NaiveDateTime,
+                reason: &str,
+            ) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+            async fn get_certificate_status(&self, cert_num: &str) -> Result<Certinfo, Box<dyn Error + Send + Sync>>;
+
+            async fn list_certificates(
+                &self,
+                status: Option<String>,
+            ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>>;
         }
     }
 
