@@ -15,12 +15,11 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
-type MysqlPool = Pool<ConnectionManager<MysqlConnection>>;
-type PgPool = Pool<ConnectionManager<PgConnection>>;
-
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DatabaseType {
     MySQL,
     PostgreSQL,
+    // SQLite, // For future implementation
 }
 
 impl DatabaseType {
@@ -31,8 +30,14 @@ impl DatabaseType {
         }
     }
 
-    #[allow(dead_code)]
-    fn default_table_name(&self) -> &'static str {
+    fn default_port(&self) -> u16 {
+        match self {
+            DatabaseType::MySQL => DEFAULT_MYSQL_PORT,
+            DatabaseType::PostgreSQL => DEFAULT_POSTGRES_PORT,
+        }
+    }
+
+    pub fn default_table_name(&self) -> &'static str {
         match self {
             DatabaseType::MySQL => DEFAULT_MYSQL_TABLE,
             DatabaseType::PostgreSQL => DEFAULT_POSTGRES_TABLE,
@@ -71,72 +76,89 @@ pub trait Database: Send + Sync {
     ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>>;
 }
 
-pub struct DieselMysqlDatabase {
+enum DatabaseConnection {
+    MySQL(Pool<ConnectionManager<MysqlConnection>>),
+    PostgreSQL(Pool<ConnectionManager<PgConnection>>),
+}
+
+pub struct DieselDatabase {
+    connection: DatabaseConnection,
     config: Arc<Config>,
-    pool: MysqlPool,
     table_name: String,
 }
 
-impl DieselMysqlDatabase {
+impl DieselDatabase {
     pub fn new(config: Arc<Config>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let database_url = match &config.dbip {
-            Some(host) => format!(
-                "mysql://{}:{}@{}:{}/{}",
-                config.dbuser,
-                config.dbpassword,
-                host,
-                config.dbport.unwrap_or(DEFAULT_MYSQL_PORT),
-                config.dbname
-            ),
-            None => format!(
-                "mysql://{}:{}@localhost/{}",
-                config.dbuser, config.dbpassword, config.dbname
-            ),
-        };
-
-        let manager = ConnectionManager::<MysqlConnection>::new(database_url);
-        let pool = Pool::builder()
-            .max_size(15)
-            .connection_timeout(Duration::from_secs(config.time as u64))
-            .build(manager)?;
-
+        let db_type = DatabaseType::from_string(&config.db_type);
+        let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
         let table_name = config
             .table_name
             .clone()
-            .unwrap_or_else(|| DEFAULT_MYSQL_TABLE.to_string());
+            .unwrap_or_else(|| db_type.default_table_name().to_string());
+
+        let connection = match db_type {
+            DatabaseType::MySQL => {
+                let database_url = match &config.dbip {
+                    Some(host) => format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        config.dbuser, config.dbpassword, host, dbport, config.dbname
+                    ),
+                    None => format!(
+                        "mysql://{}:{}@localhost/{}",
+                        config.dbuser, config.dbpassword, config.dbname
+                    ),
+                };
+
+                let manager = ConnectionManager::<MysqlConnection>::new(database_url);
+                let pool = Pool::builder()
+                    .max_size(15)
+                    .connection_timeout(Duration::from_secs(config.time as u64))
+                    .build(manager)?;
+
+                DatabaseConnection::MySQL(pool)
+            }
+            DatabaseType::PostgreSQL => {
+                let database_url = match &config.dbip {
+                    Some(host) => format!(
+                        "postgres://{}:{}@{}:{}/{}",
+                        config.dbuser, config.dbpassword, host, dbport, config.dbname
+                    ),
+                    None => format!(
+                        "postgres://{}:{}@localhost/{}",
+                        config.dbuser, config.dbpassword, config.dbname
+                    ),
+                };
+
+                let manager = ConnectionManager::<PgConnection>::new(database_url);
+                let pool = Pool::builder()
+                    .max_size(15)
+                    .connection_timeout(Duration::from_secs(config.time as u64))
+                    .build(manager)?;
+
+                DatabaseConnection::PostgreSQL(pool)
+            }
+        };
 
         Ok(Self {
+            connection,
             config,
-            pool,
             table_name,
         })
     }
 
-    fn get_connection(
+    async fn check_cert_mysql(
         &self,
-    ) -> Result<
-        diesel::r2d2::PooledConnection<ConnectionManager<MysqlConnection>>,
-        Box<dyn Error + Send + Sync>,
-    > {
-        Ok(self.pool.get()?)
-    }
-}
-
-#[async_trait]
-impl Database for DieselMysqlDatabase {
-    async fn check_cert(
-        &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
         certnum: &str,
         revoked: bool,
     ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
         let table_name = self.table_name.clone();
         let cert_num = certnum.to_string();
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
             let mut conn = connection_manager.get()?;
 
-            // Using text SQL query with explicit column names and types
             let query = format!(
                 "SELECT cert_num, revocation_time, revocation_reason, status FROM {} WHERE cert_num = ?",
                 table_name
@@ -205,279 +227,15 @@ impl Database for DieselMysqlDatabase {
         Ok(result)
     }
 
-    fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if !self.config.create_table {
-            return Ok(());
-        }
-
-        let mut conn = self.get_connection()?;
-        let query = format!("SHOW TABLES LIKE '{}'", self.table_name);
-
-        // For checking if table exists, we'll use execute instead of load for simpler handling
-        let exists: bool = diesel::sql_query(query)
-            .execute(&mut conn)
-            .map(|count| count > 0)?;
-
-        if exists {
-            info!("Table {} already exists in MySQL database", self.table_name);
-            return Ok(());
-        }
-
-        let create_table_query = format!(
-            "CREATE TABLE `{}` (
-                `cert_num` varchar(50) NOT NULL,
-                `revocation_time` datetime DEFAULT NULL,
-                `revocation_reason` enum('unspecified','key_compromise','ca_compromise','affiliation_changed','superseded','cessation_of_operation','certificate_hold','privilege_withdrawn','aa_compromise') DEFAULT NULL,
-                `status` enum('Valid','Revoked') NOT NULL DEFAULT 'Valid',
-                PRIMARY KEY (`cert_num`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-            self.table_name
-        );
-
-        diesel::sql_query(create_table_query).execute(&mut conn)?;
-
-        info!(
-            "Table {} created successfully in MySQL database",
-            self.table_name
-        );
-        Ok(())
-    }
-
-    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let table_name = self.table_name.clone();
-        let cert_num = cert_num.to_string();
-        let connection_manager = self.pool.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            let mut conn = connection_manager.get()?;
-
-            // Check if certificate already exists
-            let query = format!(
-                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
-                table_name
-            );
-
-            let exists: bool = diesel::sql_query(query.clone())
-                .bind::<sql_types::Text, _>(&cert_num)
-                .execute(&mut conn)?
-                > 0;
-
-            if exists {
-                return Err("Certificate already exists".into());
-            }
-
-            // Insert new certificate
-            let insert_query = format!(
-                "INSERT INTO {} (cert_num, status) VALUES (?, 'Valid')",
-                table_name
-            );
-
-            diesel::sql_query(insert_query)
-                .bind::<sql_types::Text, _>(&cert_num)
-                .execute(&mut conn)?;
-
-            Ok(())
-        })
-        .await?
-    }
-
-    async fn revoke_certificate(
+    async fn check_cert_postgres(
         &self,
-        cert_num: &str,
-        revocation_time: NaiveDateTime,
-        reason: &str,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let now = chrono::Utc::now().naive_utc();
-        if revocation_time > now {
-            return Err("Revocation time cannot be in the future".into());
-        }
-
-        let table_name = self.table_name.clone();
-        let cert_num = cert_num.to_string();
-        let reason = reason.to_string();
-        let connection_manager = self.pool.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            let mut conn = connection_manager.get()?;
-
-            // Check if certificate exists
-            let query = format!(
-                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
-                table_name
-            );
-
-            let exists: bool = diesel::sql_query(query.clone())
-                .bind::<sql_types::Text, _>(&cert_num)
-                .execute(&mut conn)?
-                > 0;
-
-            if !exists {
-                return Err("Certificate does not exist".into());
-            }
-
-            // Update certificate status
-            let update_query = format!(
-                "UPDATE {} SET status = 'Revoked', revocation_time = ?, revocation_reason = ? WHERE cert_num = ?",
-                table_name
-            );
-
-            diesel::sql_query(update_query)
-                .bind::<sql_types::Timestamp, _>(&revocation_time)
-                .bind::<sql_types::Text, _>(&reason)
-                .bind::<sql_types::Text, _>(&cert_num)
-                .execute(&mut conn)?;
-
-            Ok(())
-        }).await?
-    }
-
-    async fn get_certificate_status(
-        &self,
-        cert_num: &str,
-    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
-        let table_name = self.table_name.clone();
-        let cert_num = cert_num.to_string();
-        let connection_manager = self.pool.clone();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
-            let mut conn = connection_manager.get()?;
-
-            // Query certificate status
-            let query = format!(
-                "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = ?",
-                table_name
-            );
-
-            let records = diesel::sql_query(query)
-                .bind::<sql_types::Text, _>(&cert_num)
-                .load::<CertRecord>(&mut conn)?;
-
-            if records.is_empty() {
-                return Err("Certificate not found".into());
-            }
-
-            let record = &records[0];
-
-            Ok(Certinfo {
-                status: record.status.clone(),
-                revocation_time: record.revocation_time,
-                revocation_reason: record.revocation_reason.clone(),
-            })
-        }).await??;
-
-        Ok(result)
-    }
-
-    async fn list_certificates(
-        &self,
-        status: Option<String>,
-    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
-        let table_name = self.table_name.clone();
-        let status_filter = status.map(|s| s.to_string());
-        let connection_manager = self.pool.clone();
-
-        let result = tokio::task::spawn_blocking(
-            move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
-                let mut conn = connection_manager.get()?;
-
-                // Build query based on status filter (MySQL)
-                let query = match &status_filter {
-                    Some(_s) => format!(
-                        "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE status = ?",
-                        table_name
-                    ),
-                    None => format!("SELECT cert_num, status, revocation_time, revocation_reason FROM {}", table_name),
-                };
-
-                // Execute query with or without filter
-                let records: Vec<CertRecord> = if let Some(s) = &status_filter {
-                    diesel::sql_query(query)
-                        .bind::<sql_types::Text, _>(s)
-                        .load::<CertRecord>(&mut conn)?
-                } else {
-                    diesel::sql_query(query).load::<CertRecord>(&mut conn)?
-                };
-
-                // Convert to response format
-                let responses = records
-                    .into_iter()
-                    .map(|record| CertificateResponse {
-                        cert_num: record.cert_num,
-                        status: record.status,
-                        message: String::new(),
-                    })
-                    .collect();
-
-                Ok(responses)
-            },
-        )
-        .await??;
-
-        Ok(result)
-    }
-}
-
-pub struct DieselPgDatabase {
-    config: Arc<Config>,
-    pool: PgPool,
-    table_name: String,
-}
-
-impl DieselPgDatabase {
-    pub fn new(config: Arc<Config>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let database_url = match &config.dbip {
-            Some(host) => format!(
-                "postgres://{}:{}@{}:{}/{}",
-                config.dbuser,
-                config.dbpassword,
-                host,
-                config.dbport.unwrap_or(DEFAULT_POSTGRES_PORT),
-                config.dbname
-            ),
-            None => format!(
-                "postgres://{}:{}@localhost/{}",
-                config.dbuser, config.dbpassword, config.dbname
-            ),
-        };
-
-        let manager = ConnectionManager::<PgConnection>::new(database_url);
-        let pool = Pool::builder()
-            .max_size(15)
-            .connection_timeout(Duration::from_secs(config.time as u64))
-            .build(manager)?;
-
-        let table_name = config
-            .table_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_POSTGRES_TABLE.to_string());
-
-        Ok(Self {
-            config,
-            pool,
-            table_name,
-        })
-    }
-
-    fn get_connection(
-        &self,
-    ) -> Result<
-        diesel::r2d2::PooledConnection<ConnectionManager<PgConnection>>,
-        Box<dyn Error + Send + Sync>,
-    > {
-        Ok(self.pool.get()?)
-    }
-}
-
-#[async_trait]
-impl Database for DieselPgDatabase {
-    async fn check_cert(
-        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
         certnum: &str,
         revoked: bool,
     ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
         let table_name = self.table_name.clone();
         let cert_num = certnum.to_string();
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
             let mut conn = connection_manager.get()?;
@@ -551,14 +309,57 @@ impl Database for DieselPgDatabase {
         Ok(result)
     }
 
-    fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn create_tables_if_needed_mysql(
+        &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if !self.config.create_table {
             return Ok(());
         }
 
-        let mut conn = self.get_connection()?;
+        let mut conn = pool.get()?;
+        let query = format!("SHOW TABLES LIKE '{}'", self.table_name);
 
-        // Using a simpler check query that works well with QueryableByName
+        // For checking if table exists, we'll use execute instead of load for simpler handling
+        let exists: bool = diesel::sql_query(query)
+            .execute(&mut conn)
+            .map(|count| count > 0)?;
+
+        if exists {
+            info!("Table {} already exists in MySQL database", self.table_name);
+            return Ok(());
+        }
+
+        let create_table_query = format!(
+            "CREATE TABLE `{}` (
+                `cert_num` varchar(50) NOT NULL,
+                `revocation_time` datetime DEFAULT NULL,
+                `revocation_reason` enum('unspecified','key_compromise','ca_compromise','affiliation_changed','superseded','cessation_of_operation','certificate_hold','privilege_withdrawn','aa_compromise') DEFAULT NULL,
+                `status` enum('Valid','Revoked') NOT NULL DEFAULT 'Valid',
+                PRIMARY KEY (`cert_num`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            self.table_name
+        );
+
+        diesel::sql_query(create_table_query).execute(&mut conn)?;
+
+        info!(
+            "Table {} created successfully in MySQL database",
+            self.table_name
+        );
+        Ok(())
+    }
+
+    fn create_tables_if_needed_postgres(
+        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.config.create_table {
+            return Ok(());
+        }
+
+        let mut conn = pool.get()?;
+
         let exists_query = format!(
             "SELECT EXISTS (
                 SELECT FROM information_schema.tables
@@ -580,7 +381,6 @@ impl Database for DieselPgDatabase {
             return Ok(());
         }
 
-        // Check if types exist with a properly formatted query
         let types_exist_query = "SELECT EXISTS (
                 SELECT FROM pg_type
                 WHERE typname = 'cert_status'
@@ -592,7 +392,6 @@ impl Database for DieselPgDatabase {
         let types_exist = !types_exist_results.is_empty() && types_exist_results[0].exists;
 
         if !types_exist {
-            // Split into two separate queries to avoid issues
             diesel::sql_query("CREATE TYPE cert_status AS ENUM ('Valid', 'Revoked');")
                 .execute(&mut conn)?;
 
@@ -630,15 +429,60 @@ impl Database for DieselPgDatabase {
         Ok(())
     }
 
-    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn add_certificate_mysql(
+        &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
+        cert_num: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let table_name = self.table_name.clone();
         let cert_num = cert_num.to_string();
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
             let mut conn = connection_manager.get()?;
 
             // Check if certificate already exists
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query.clone())
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if exists {
+                return Err("Certificate already exists".into());
+            }
+
+            // Insert new certificate
+            let insert_query = format!(
+                "INSERT INTO {} (cert_num, status) VALUES (?, 'Valid')",
+                table_name
+            );
+
+            diesel::sql_query(insert_query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn add_certificate_postgres(
+        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
+        cert_num: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
             let query = format!(
                 "SELECT EXISTS (SELECT 1 FROM {} WHERE cert_num = $1) as exists",
                 table_name
@@ -654,7 +498,6 @@ impl Database for DieselPgDatabase {
                 return Err("Certificate already exists".into());
             }
 
-            // Insert new certificate
             let insert_query = format!(
                 "INSERT INTO {} (cert_num, status) VALUES ($1, 'Valid')",
                 table_name
@@ -669,26 +512,67 @@ impl Database for DieselPgDatabase {
         .await?
     }
 
-    async fn revoke_certificate(
+    async fn revoke_certificate_mysql(
         &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
         cert_num: &str,
         revocation_time: NaiveDateTime,
         reason: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let now = chrono::Utc::now().naive_utc();
-        if revocation_time > now {
-            return Err("Revocation time cannot be in the future".into());
-        }
-
         let table_name = self.table_name.clone();
         let cert_num = cert_num.to_string();
         let reason = reason.to_string();
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
             let mut conn = connection_manager.get()?;
 
             // Check if certificate exists
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query.clone())
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if !exists {
+                return Err("Certificate does not exist".into());
+            }
+
+            // Update certificate status
+            let update_query = format!(
+                "UPDATE {} SET status = 'Revoked', revocation_time = ?, revocation_reason = ? WHERE cert_num = ?",
+                table_name
+            );
+
+            diesel::sql_query(update_query)
+                .bind::<sql_types::Timestamp, _>(&revocation_time)
+                .bind::<sql_types::Text, _>(&reason)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        }).await?
+    }
+
+    async fn revoke_certificate_postgres(
+        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let reason = reason.to_string();
+        let connection_manager = pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
             let query = format!(
                 "SELECT EXISTS (SELECT 1 FROM {} WHERE cert_num = $1) as exists",
                 table_name
@@ -721,13 +605,52 @@ impl Database for DieselPgDatabase {
         }).await?
     }
 
-    async fn get_certificate_status(
+    async fn get_certificate_status_mysql(
         &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
         cert_num: &str,
     ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
         let table_name = self.table_name.clone();
         let cert_num = cert_num.to_string();
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Query certificate status
+            let query = format!(
+                "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let records = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<CertRecord>(&mut conn)?;
+
+            if records.is_empty() {
+                return Err("Certificate not found".into());
+            }
+
+            let record = &records[0];
+
+            Ok(Certinfo {
+                status: record.status.clone(),
+                revocation_time: record.revocation_time,
+                revocation_reason: record.revocation_reason.clone(),
+            })
+        }).await??;
+
+        Ok(result)
+    }
+
+    async fn get_certificate_status_postgres(
+        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = pool.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
             let mut conn = connection_manager.get()?;
@@ -758,13 +681,63 @@ impl Database for DieselPgDatabase {
         Ok(result)
     }
 
-    async fn list_certificates(
+    async fn list_certificates_mysql(
         &self,
+        pool: &Pool<ConnectionManager<MysqlConnection>>,
         status: Option<String>,
     ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
         let table_name = self.table_name.clone();
         let status_filter = status.map(|s| s.to_string());
-        let connection_manager = self.pool.clone();
+        let connection_manager = pool.clone();
+
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+                let mut conn = connection_manager.get()?;
+
+                // Build query based on status filter (MySQL)
+                let query = match &status_filter {
+                    Some(_s) => format!(
+                        "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE status = ?",
+                        table_name
+                    ),
+                    None => format!("SELECT cert_num, status, revocation_time, revocation_reason FROM {}", table_name),
+                };
+
+                // Execute query with or without filter
+                let records: Vec<CertRecord> = if let Some(s) = &status_filter {
+                    diesel::sql_query(query)
+                        .bind::<sql_types::Text, _>(s)
+                        .load::<CertRecord>(&mut conn)?
+                } else {
+                    diesel::sql_query(query).load::<CertRecord>(&mut conn)?
+                };
+
+                // Convert to response format
+                let responses = records
+                    .into_iter()
+                    .map(|record| CertificateResponse {
+                        cert_num: record.cert_num,
+                        status: record.status,
+                        message: String::new(),
+                    })
+                    .collect();
+
+                Ok(responses)
+            },
+        )
+        .await??;
+
+        Ok(result)
+    }
+
+    async fn list_certificates_postgres(
+        &self,
+        pool: &Pool<ConnectionManager<PgConnection>>,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let status_filter = status.map(|s| s.to_string());
+        let connection_manager = pool.clone();
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
@@ -807,19 +780,92 @@ impl Database for DieselPgDatabase {
     }
 }
 
+#[async_trait]
+impl Database for DieselDatabase {
+    async fn check_cert(
+        &self,
+        certnum: &str,
+        revoked: bool,
+    ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => self.check_cert_mysql(pool, certnum, revoked).await,
+            DatabaseConnection::PostgreSQL(pool) => {
+                self.check_cert_postgres(pool, certnum, revoked).await
+            }
+        }
+    }
+
+    fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => self.create_tables_if_needed_mysql(pool),
+            DatabaseConnection::PostgreSQL(pool) => self.create_tables_if_needed_postgres(pool),
+        }
+    }
+
+    async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => self.add_certificate_mysql(pool, cert_num).await,
+            DatabaseConnection::PostgreSQL(pool) => {
+                self.add_certificate_postgres(pool, cert_num).await
+            }
+        }
+    }
+
+    async fn revoke_certificate(
+        &self,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let now = chrono::Utc::now().naive_utc();
+        if revocation_time > now {
+            return Err("Revocation time cannot be in the future".into());
+        }
+
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => {
+                self.revoke_certificate_mysql(pool, cert_num, revocation_time, reason)
+                    .await
+            }
+            DatabaseConnection::PostgreSQL(pool) => {
+                self.revoke_certificate_postgres(pool, cert_num, revocation_time, reason)
+                    .await
+            }
+        }
+    }
+
+    async fn get_certificate_status(
+        &self,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => {
+                self.get_certificate_status_mysql(pool, cert_num).await
+            }
+            DatabaseConnection::PostgreSQL(pool) => {
+                self.get_certificate_status_postgres(pool, cert_num).await
+            }
+        }
+    }
+
+    async fn list_certificates(
+        &self,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+        match &self.connection {
+            DatabaseConnection::MySQL(pool) => self.list_certificates_mysql(pool, status).await,
+            DatabaseConnection::PostgreSQL(pool) => {
+                self.list_certificates_postgres(pool, status).await
+            }
+        }
+    }
+}
+
 pub fn create_database(
     config: Arc<Config>,
 ) -> Result<Box<dyn Database>, Box<dyn Error + Send + Sync>> {
-    match DatabaseType::from_string(&config.db_type) {
-        DatabaseType::MySQL => {
-            let db = DieselMysqlDatabase::new(config)?;
-            Ok(Box::new(db))
-        }
-        DatabaseType::PostgreSQL => {
-            let db = DieselPgDatabase::new(config)?;
-            Ok(Box::new(db))
-        }
-    }
+    let db = DieselDatabase::new(config)?;
+    Ok(Box::new(db))
 }
 
 #[cfg(test)]
