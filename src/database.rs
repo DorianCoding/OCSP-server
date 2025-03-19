@@ -1,17 +1,18 @@
 use crate::r#struct::{
     BoolResult, CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_MYSQL_PORT,
-    DEFAULT_MYSQL_TABLE, DEFAULT_POSTGRES_PORT, DEFAULT_POSTGRES_TABLE,
+    DEFAULT_MYSQL_TABLE, DEFAULT_POSTGRES_PORT, DEFAULT_POSTGRES_TABLE, DEFAULT_SQLITE_TABLE,
 };
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::sql_types;
-use diesel::{MysqlConnection, PgConnection};
+use diesel::{MysqlConnection, PgConnection, SqliteConnection};
 use log::{debug, info, warn};
 use ocsp::common::asn1::GeneralizedTime;
 use ocsp::response::{CertStatus as OcspCertStatus, CertStatusCode, CrlReason, RevokedInfo};
 use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,13 +20,14 @@ use std::time::Duration;
 pub enum DatabaseType {
     MySQL,
     PostgreSQL,
-    // SQLite, // For future implementation
+    SQLite,
 }
 
 impl DatabaseType {
     pub fn from_string(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "postgres" | "postgresql" => DatabaseType::PostgreSQL,
+            "sqlite" => DatabaseType::SQLite,
             _ => DatabaseType::MySQL,
         }
     }
@@ -34,6 +36,7 @@ impl DatabaseType {
         match self {
             DatabaseType::MySQL => DEFAULT_MYSQL_PORT,
             DatabaseType::PostgreSQL => DEFAULT_POSTGRES_PORT,
+            DatabaseType::SQLite => 0,
         }
     }
 
@@ -41,6 +44,7 @@ impl DatabaseType {
         match self {
             DatabaseType::MySQL => DEFAULT_MYSQL_TABLE,
             DatabaseType::PostgreSQL => DEFAULT_POSTGRES_TABLE,
+            DatabaseType::SQLite => DEFAULT_SQLITE_TABLE,
         }
     }
 }
@@ -55,7 +59,6 @@ pub trait Database: Send + Sync {
 
     fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>>;
 
-    // New API-related methods
     async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
 
     async fn revoke_certificate(
@@ -79,6 +82,7 @@ pub trait Database: Send + Sync {
 enum DatabaseConnection {
     MySQL(Pool<ConnectionManager<MysqlConnection>>),
     PostgreSQL(Pool<ConnectionManager<PgConnection>>),
+    SQLite(Pool<ConnectionManager<SqliteConnection>>),
 }
 
 pub struct DieselDatabase {
@@ -136,6 +140,25 @@ impl DieselDatabase {
                     .build(manager)?;
 
                 DatabaseConnection::PostgreSQL(pool)
+            }
+            DatabaseType::SQLite => {
+                let db_path = &config.dbname;
+
+                if let Some(parent) = Path::new(db_path).parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+
+                let database_url = format!("sqlite://{}", db_path);
+
+                let manager = ConnectionManager::<SqliteConnection>::new(database_url);
+                let pool = Pool::builder()
+                    .max_size(1)
+                    .connection_timeout(Duration::from_secs(config.time as u64))
+                    .build(manager)?;
+
+                DatabaseConnection::SQLite(pool)
             }
         };
 
@@ -252,6 +275,88 @@ impl DieselDatabase {
 
             if results.is_empty() {
                 warn!("Entry not found for cert {} in PostgreSQL", cert_num);
+                if !revoked {
+                    Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
+                } else {
+                    Ok(OcspCertStatus::new(
+                        CertStatusCode::Revoked,
+                        Some(RevokedInfo::new(
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            Some(CrlReason::OcspRevokeCertHold),
+                        )),
+                    ))
+                }
+            } else {
+                let record = &results[0];
+                debug!("Entry found for cert {}, status {}", cert_num, record.status);
+
+                if record.status == "Revoked" {
+                    let time = GeneralizedTime::now();
+
+                    let time = if let Some(rt) = record.revocation_time {
+                        GeneralizedTime::new(
+                            rt.year(),
+                            rt.month(),
+                            rt.day(),
+                            rt.hour(),
+                            rt.minute(),
+                            rt.second(),
+                        ).unwrap_or(time)
+                    } else {
+                        time
+                    };
+
+                    let motif = record.revocation_reason.clone().unwrap_or_default();
+                    let motif: CrlReason = match motif.as_str() {
+                        "key_compromise" => CrlReason::OcspRevokeKeyCompromise,
+                        "ca_compromise" => CrlReason::OcspRevokeCaCompromise,
+                        "affiliation_changed" => CrlReason::OcspRevokeAffChanged,
+                        "superseded" => CrlReason::OcspRevokeSuperseded,
+                        "cessation_of_operation" => CrlReason::OcspRevokeCessOperation,
+                        "certificate_hold" => CrlReason::OcspRevokeCertHold,
+                        "privilege_withdrawn" => CrlReason::OcspRevokePrivWithdrawn,
+                        "aa_compromise" => CrlReason::OcspRevokeAaCompromise,
+                        _ => CrlReason::OcspRevokeUnspecified,
+                    };
+
+                    Ok(OcspCertStatus::new(
+                        CertStatusCode::Revoked,
+                        Some(RevokedInfo::new(time, Some(motif))),
+                    ))
+                } else {
+                    Ok(OcspCertStatus::new(CertStatusCode::Good, None))
+                }
+            }
+        }).await??;
+
+        Ok(result)
+    }
+
+    async fn check_cert_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        certnum: &str,
+        revoked: bool,
+    ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = certnum.to_string();
+        let connection_manager = pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            // Using text SQL query with explicit column names and types
+            let query = format!(
+                "SELECT cert_num, revocation_time, revocation_reason, status FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let results = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<CertRecord>(&mut conn)?;
+
+            if results.is_empty() {
+                warn!("Entry not found for cert {} in SQLite", cert_num);
                 if !revoked {
                     Ok(OcspCertStatus::new(CertStatusCode::Unknown, None))
                 } else {
@@ -429,6 +534,57 @@ impl DieselDatabase {
         Ok(())
     }
 
+    fn create_tables_if_needed_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if !self.config.create_table {
+            return Ok(());
+        }
+
+        let mut conn = pool.get()?;
+
+        let exists_query = format!(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='{}'",
+            self.table_name
+        );
+
+        let exists: bool = diesel::sql_query(exists_query)
+            .execute(&mut conn)
+            .map(|count| count > 0)?;
+
+        if exists {
+            info!(
+                "Table {} already exists in SQLite database",
+                self.table_name
+            );
+            return Ok(());
+        }
+
+        let create_table_query = format!(
+            "CREATE TABLE {} (
+                cert_num TEXT PRIMARY KEY,
+                revocation_time TIMESTAMP DEFAULT NULL,
+                revocation_reason TEXT DEFAULT NULL CHECK(
+                    revocation_reason IS NULL OR
+                    revocation_reason IN ('unspecified', 'key_compromise', 'ca_compromise',
+                                     'affiliation_changed', 'superseded', 'cessation_of_operation',
+                                     'certificate_hold', 'privilege_withdrawn', 'aa_compromise')
+                ),
+                status TEXT NOT NULL DEFAULT 'Valid' CHECK(status IN ('Valid', 'Revoked'))
+            )",
+            self.table_name
+        );
+
+        diesel::sql_query(create_table_query).execute(&mut conn)?;
+
+        info!(
+            "Table {} created successfully in SQLite database",
+            self.table_name
+        );
+        Ok(())
+    }
+
     async fn add_certificate_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -500,6 +656,46 @@ impl DieselDatabase {
 
             let insert_query = format!(
                 "INSERT INTO {} (cert_num, status) VALUES ($1, 'Valid')",
+                table_name
+            );
+
+            diesel::sql_query(insert_query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn add_certificate_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        cert_num: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if exists {
+                return Err("Certificate already exists".into());
+            }
+
+            let insert_query = format!(
+                "INSERT INTO {} (cert_num, status) VALUES (?, 'Valid')",
                 table_name
             );
 
@@ -605,6 +801,50 @@ impl DieselDatabase {
         }).await?
     }
 
+    async fn revoke_certificate_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        cert_num: &str,
+        revocation_time: NaiveDateTime,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let reason = reason.to_string();
+        let connection_manager = pool.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            let query = format!(
+                "SELECT COUNT(*) as count FROM {} WHERE cert_num = ?",
+                table_name
+            );
+
+            let exists: bool = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?
+                > 0;
+
+            if !exists {
+                return Err("Certificate does not exist".into());
+            }
+
+            let update_query = format!(
+                "UPDATE {} SET status = 'Revoked', revocation_time = ?, revocation_reason = ? WHERE cert_num = ?",
+                table_name
+            );
+
+            diesel::sql_query(update_query)
+                .bind::<sql_types::Timestamp, _>(&revocation_time)
+                .bind::<sql_types::Text, _>(&reason)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .execute(&mut conn)?;
+
+            Ok(())
+        }).await?
+    }
+
     async fn get_certificate_status_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -658,6 +898,43 @@ impl DieselDatabase {
             // Query certificate status
             let query = format!(
                 "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = $1",
+                table_name
+            );
+
+            let records = diesel::sql_query(query)
+                .bind::<sql_types::Text, _>(&cert_num)
+                .load::<CertRecord>(&mut conn)?;
+
+            if records.is_empty() {
+                return Err("Certificate not found".into());
+            }
+
+            let record = &records[0];
+
+            Ok(Certinfo {
+                status: record.status.clone(),
+                revocation_time: record.revocation_time,
+                revocation_reason: record.revocation_reason.clone(),
+            })
+        }).await??;
+
+        Ok(result)
+    }
+
+    async fn get_certificate_status_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        cert_num: &str,
+    ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let cert_num = cert_num.to_string();
+        let connection_manager = pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
+            let mut conn = connection_manager.get()?;
+
+            let query = format!(
+                "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE cert_num = ?",
                 table_name
             );
 
@@ -778,6 +1055,52 @@ impl DieselDatabase {
 
         Ok(result)
     }
+
+    async fn list_certificates_sqlite(
+        &self,
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        status: Option<String>,
+    ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+        let table_name = self.table_name.clone();
+        let status_filter = status.map(|s| s.to_string());
+        let connection_manager = pool.clone();
+
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
+                let mut conn = connection_manager.get()?;
+
+                let query = match &status_filter {
+                    Some(_s) => format!(
+                        "SELECT cert_num, status, revocation_time, revocation_reason FROM {} WHERE status = ?",
+                        table_name
+                    ),
+                    None => format!("SELECT cert_num, status, revocation_time, revocation_reason FROM {}", table_name),
+                };
+
+                let records: Vec<CertRecord> = if let Some(s) = &status_filter {
+                    diesel::sql_query(query)
+                        .bind::<sql_types::Text, _>(s)
+                        .load::<CertRecord>(&mut conn)?
+                } else {
+                    diesel::sql_query(query).load::<CertRecord>(&mut conn)?
+                };
+
+                let responses = records
+                    .into_iter()
+                    .map(|record| CertificateResponse {
+                        cert_num: record.cert_num,
+                        status: record.status,
+                        message: String::new(),
+                    })
+                    .collect();
+
+                Ok(responses)
+            },
+        )
+        .await??;
+
+        Ok(result)
+    }
 }
 
 #[async_trait]
@@ -792,6 +1115,9 @@ impl Database for DieselDatabase {
             DatabaseConnection::PostgreSQL(pool) => {
                 self.check_cert_postgres(pool, certnum, revoked).await
             }
+            DatabaseConnection::SQLite(pool) => {
+                self.check_cert_sqlite(pool, certnum, revoked).await
+            }
         }
     }
 
@@ -799,6 +1125,7 @@ impl Database for DieselDatabase {
         match &self.connection {
             DatabaseConnection::MySQL(pool) => self.create_tables_if_needed_mysql(pool),
             DatabaseConnection::PostgreSQL(pool) => self.create_tables_if_needed_postgres(pool),
+            DatabaseConnection::SQLite(pool) => self.create_tables_if_needed_sqlite(pool),
         }
     }
 
@@ -808,6 +1135,7 @@ impl Database for DieselDatabase {
             DatabaseConnection::PostgreSQL(pool) => {
                 self.add_certificate_postgres(pool, cert_num).await
             }
+            DatabaseConnection::SQLite(pool) => self.add_certificate_sqlite(pool, cert_num).await,
         }
     }
 
@@ -831,6 +1159,10 @@ impl Database for DieselDatabase {
                 self.revoke_certificate_postgres(pool, cert_num, revocation_time, reason)
                     .await
             }
+            DatabaseConnection::SQLite(pool) => {
+                self.revoke_certificate_sqlite(pool, cert_num, revocation_time, reason)
+                    .await
+            }
         }
     }
 
@@ -845,6 +1177,9 @@ impl Database for DieselDatabase {
             DatabaseConnection::PostgreSQL(pool) => {
                 self.get_certificate_status_postgres(pool, cert_num).await
             }
+            DatabaseConnection::SQLite(pool) => {
+                self.get_certificate_status_sqlite(pool, cert_num).await
+            }
         }
     }
 
@@ -857,6 +1192,7 @@ impl Database for DieselDatabase {
             DatabaseConnection::PostgreSQL(pool) => {
                 self.list_certificates_postgres(pool, status).await
             }
+            DatabaseConnection::SQLite(pool) => self.list_certificates_sqlite(pool, status).await,
         }
     }
 }
@@ -927,6 +1263,14 @@ mod tests {
             DatabaseType::PostgreSQL
         ));
         assert!(matches!(
+            DatabaseType::from_string("sqlite"),
+            DatabaseType::SQLite
+        ));
+        assert!(matches!(
+            DatabaseType::from_string("SQLite"),
+            DatabaseType::SQLite
+        ));
+        assert!(matches!(
             DatabaseType::from_string("unknown"),
             DatabaseType::MySQL
         ));
@@ -941,6 +1285,10 @@ mod tests {
         assert_eq!(
             DatabaseType::PostgreSQL.default_table_name(),
             DEFAULT_POSTGRES_TABLE
+        );
+        assert_eq!(
+            DatabaseType::SQLite.default_table_name(),
+            DEFAULT_SQLITE_TABLE
         );
     }
 }

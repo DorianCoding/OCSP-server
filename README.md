@@ -30,7 +30,7 @@ The config file should contain the following informations :
 #Config file, all fields are compulsory
 cachedays = 3 #Number of days a response is valid once created (only for valid certificates)
 dbip = "127.0.0.1" #Optional. IP to connect to MySql database. If absent, use of unix socket.
-db_type = "mysql" # Can be "mysql" or "postgres"
+db_type = "mysql" # Can be "mysql" or "postgres" or "sqlite"
 dbuser = "cert" #Username to connect to MySql database
 dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 dbname = "certs" #Name to connect to MySql data

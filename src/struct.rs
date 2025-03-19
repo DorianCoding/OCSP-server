@@ -33,6 +33,7 @@ pub(crate) const DEFAULT_MYSQL_PORT: u16 = 3306;
 pub(crate) const DEFAULT_POSTGRES_PORT: u16 = 5432;
 pub(crate) const DEFAULT_MYSQL_TABLE: &str = "list_certs";
 pub(crate) const DEFAULT_POSTGRES_TABLE: &str = "ocsp_list_certs";
+pub(crate) const DEFAULT_SQLITE_TABLE: &str = "ocsp_list_certs";
 
 #[derive(Debug)]
 pub(crate) struct Config {

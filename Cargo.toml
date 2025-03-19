@@ -20,7 +20,7 @@ clap = { version = "4.5.32", features = ["derive", "cargo"] }
 chrono = { version = "~0.4.40", default-features = false, features = ["std", "serde"] }
 config-file = "~0.2.3"
 serde = "~1.0.219"
-diesel = { version = "2.2.8", features = ["mysql", "postgres", "r2d2", "chrono"] }
+diesel = { version = "2.2.8", features = ["mysql", "postgres", "sqlite", "r2d2", "chrono"] }
 r2d2 = "0.8.10"
 ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
 pem = "3.0.5"

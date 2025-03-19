@@ -1,6 +1,6 @@
 #Config file, all fields are compulsory
 cachedays = 3
-db_type = "mysql" # Can be "mysql" or "postgres"
+db_type = "mysql" # Can be "mysql" or "postgres" or "sqlite"
 dbip = "127.0.0.1"
 dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 port = 9000

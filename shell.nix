@@ -10,6 +10,7 @@ pkgs.mkShell {
     git
     openssl
     libmysqlclient
+    sqlite
     postgresql
     pkg-config
   ];
