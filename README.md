@@ -36,6 +36,7 @@ dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
 port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service). By default 9000
+listen_ip = "0.0.0.0" # Optional: IP address to listen on (default: 127.0.0.1)
 timeout = 5 #Optional timeout, default 5s
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
 itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate as PEM format

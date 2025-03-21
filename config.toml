@@ -4,6 +4,7 @@ db_type = "mysql" # Can be "mysql" or "postgres" or "sqlite"
 dbip = "127.0.0.1"
 dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 port = 9000
+listen_ip = "0.0.0.0" # Optional: IP address to listen on (default: 127.0.0.1)
 timeout = 10
 dbuser = "ocsp"
 dbpassword = "ocsp"

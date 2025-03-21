@@ -28,6 +28,7 @@ pub(crate) struct Cli {
 
 pub(crate) const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 pub(crate) const DEFAULT_PORT: u16 = 9000;
+pub(crate) const DEFAULT_LISTEN_IP: &str = "127.0.0.1";
 pub(crate) const DEFAULT_TIMEOUT: u8 = 5;
 pub(crate) const DEFAULT_MYSQL_PORT: u16 = 3306;
 pub(crate) const DEFAULT_POSTGRES_PORT: u16 = 5432;
@@ -55,6 +56,7 @@ pub(crate) struct Config {
     pub(crate) table_name: Option<String>,
     pub(crate) api_keys: Option<Vec<String>>,
     pub(crate) enable_api: bool,
+    pub(crate) listen_ip: String,
 }
 
 // Don't implement Default for Config, because we can't easily create a dummy RsaKeyPair.
@@ -76,6 +78,7 @@ pub(crate) struct Fileconfig {
     pub(crate) revocextended: Option<bool>,
     pub(crate) dbip: Option<String>,
     pub(crate) port: Option<u16>,
+    pub(crate) listen_ip: Option<String>,
     pub(crate) timeout: Option<u8>,
     pub(crate) dbuser: String,
     pub(crate) dbpassword: String,
