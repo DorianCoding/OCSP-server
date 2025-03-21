@@ -528,6 +528,12 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     // Get HTTP port
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
+    // Get listen IP address
+    let listen_ip = config
+        .listen_ip
+        .clone()
+        .unwrap_or_else(|| DEFAULT_LISTEN_IP.to_string());
+
     // Determine database type and default port
     let db_type = config
         .db_type
@@ -562,6 +568,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         table_name: config.table_name.clone(),
         api_keys: config.api_keys.clone(),
         enable_api: config.enable_api.unwrap_or(false),
+        listen_ip,
     });
 
     // Create database connection and tables if needed
@@ -583,9 +590,14 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         fs::create_dir_all(path).expect("Cannot create cache folder");
     }
 
+    // Set up Rocket to listen on the configured IP address and port
+    let figment = rocket::Config::figment()
+        .merge(("port", port))
+        .merge(("address", config.listen_ip.clone()));
+
     // Create rocket instance with routes
     let mut rocket_builder = rocket::build()
-        .configure(rocket::Config::figment().merge(("port", port)))
+        .configure(figment)
         .mount("/", routes![upload])
         .mount("/", routes![upload2])
         .manage(config.clone())
