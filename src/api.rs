@@ -174,13 +174,19 @@ async fn list_certificates(
     status: Option<String>,
     db: &State<Box<dyn Database>>,
 ) -> Result<Json<Vec<CertificateResponse>>, Status> {
-    if let Some(ref s) = status {
-        if s != "Valid" && s != "Revoked" && s != "all" {
+    let liststatus = ["Valid","revoked","All"];
+    let filtered_status = match status {
+        Some(d) if liststatus.iter().any(|p| *p == d.as_str()) => {
+            if d == "All" {
+                Some(d)
+            } else {
+                None
+            }
+        },
+        _ => {
             return Err(Status::BadRequest);
         }
-    }
-
-    let filtered_status = status.filter(|s| s != "all");
+    };
 
     match db.list_certificates(filtered_status).await {
         Ok(certs) => {

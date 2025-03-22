@@ -1,13 +1,26 @@
 use crate::r#struct::{
-    BoolResult, CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_MYSQL_PORT,
-    DEFAULT_MYSQL_TABLE, DEFAULT_POSTGRES_PORT, DEFAULT_POSTGRES_TABLE, DEFAULT_SQLITE_TABLE,
+    CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_SQLITE_TABLE,
 };
+#[cfg(feature="mysql")]
+use crate::r#struct::DEFAULT_MYSQL_PORT;
+#[cfg(feature="mysql")]
+use crate::r#struct::DEFAULT_MYSQL_TABLE;
+#[cfg(feature="postgres")]
+use crate::r#struct::DEFAULT_POSTGRES_PORT;
+#[cfg(feature="postgres")]
+use crate::r#struct::DEFAULT_POSTGRES_TABLE;
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::sql_types;
-use diesel::{MysqlConnection, PgConnection, SqliteConnection};
+use diesel::SqliteConnection;
+#[cfg(feature = "mysql")]
+use diesel::MysqlConnection;
+#[cfg(feature = "postgres")]
+use diesel::PgConnection;
+#[cfg(feature = "postgres")]
+use crate::BoolResult;
 use log::{debug, info, warn};
 use ocsp::common::asn1::GeneralizedTime;
 use ocsp::response::{CertStatus as OcspCertStatus, CertStatusCode, CrlReason, RevokedInfo};
@@ -26,12 +39,12 @@ pub enum DatabaseType {
 impl DatabaseType {
     pub fn from_string(s: &str) -> Self {
         match s.to_lowercase().as_str() {
+            "mysql" | "MySql" => DatabaseType::MySQL,
             "postgres" | "postgresql" => DatabaseType::PostgreSQL,
-            "sqlite" => DatabaseType::SQLite,
-            _ => DatabaseType::MySQL,
+            _ => DatabaseType::SQLite,
         }
     }
-
+    #[cfg(any(feature = "mysql",feature="postgres"))]
     fn default_port(&self) -> u16 {
         match self {
             DatabaseType::MySQL => DEFAULT_MYSQL_PORT,
@@ -42,9 +55,11 @@ impl DatabaseType {
 
     pub fn default_table_name(&self) -> &'static str {
         match self {
+            #[cfg(feature = "mysql")]
             DatabaseType::MySQL => DEFAULT_MYSQL_TABLE,
+            #[cfg(feature = "postgres")]
             DatabaseType::PostgreSQL => DEFAULT_POSTGRES_TABLE,
-            DatabaseType::SQLite => DEFAULT_SQLITE_TABLE,
+            _ => DEFAULT_SQLITE_TABLE,
         }
     }
 }
@@ -80,7 +95,9 @@ pub trait Database: Send + Sync {
 }
 
 enum DatabaseConnection {
+    #[cfg(feature = "mysql")]
     MySQL(Pool<ConnectionManager<MysqlConnection>>),
+    #[cfg(feature = "postgres")]
     PostgreSQL(Pool<ConnectionManager<PgConnection>>),
     SQLite(Pool<ConnectionManager<SqliteConnection>>),
 }
@@ -94,14 +111,15 @@ pub struct DieselDatabase {
 impl DieselDatabase {
     pub fn new(config: Arc<Config>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let db_type = DatabaseType::from_string(&config.db_type);
-        let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
         let table_name = config
             .table_name
             .clone()
             .unwrap_or_else(|| db_type.default_table_name().to_string());
 
         let connection = match db_type {
+            #[cfg(feature="mysql")]
             DatabaseType::MySQL => {
+                let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
                 let database_url = match &config.dbip {
                     Some(host) => format!(
                         "mysql://{}:{}@{}:{}/{}",
@@ -121,7 +139,9 @@ impl DieselDatabase {
 
                 DatabaseConnection::MySQL(pool)
             }
+            #[cfg(feature="postgres")]
             DatabaseType::PostgreSQL => {
+                let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
                 let database_url = match &config.dbip {
                     Some(host) => format!(
                         "postgres://{}:{}@{}:{}/{}",
@@ -141,7 +161,7 @@ impl DieselDatabase {
 
                 DatabaseConnection::PostgreSQL(pool)
             }
-            DatabaseType::SQLite => {
+            _ => {
                 let db_path = &config.dbname;
 
                 if let Some(parent) = Path::new(db_path).parent() {
@@ -168,7 +188,7 @@ impl DieselDatabase {
             table_name,
         })
     }
-
+    #[cfg(feature="mysql")]
     async fn check_cert_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -249,7 +269,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-
+    #[cfg(feature="postgres")]
     async fn check_cert_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -413,7 +433,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-
+    #[cfg(feature="mysql")]
     fn create_tables_if_needed_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -454,7 +474,7 @@ impl DieselDatabase {
         );
         Ok(())
     }
-
+    #[cfg(feature="postgres")]
     fn create_tables_if_needed_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -584,7 +604,7 @@ impl DieselDatabase {
         );
         Ok(())
     }
-
+    #[cfg(feature="mysql")]
     async fn add_certificate_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -626,7 +646,7 @@ impl DieselDatabase {
         })
         .await?
     }
-
+    #[cfg(feature="postgres")]
     async fn add_certificate_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -707,7 +727,7 @@ impl DieselDatabase {
         })
         .await?
     }
-
+    #[cfg(feature="mysql")]
     async fn revoke_certificate_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -753,7 +773,7 @@ impl DieselDatabase {
             Ok(())
         }).await?
     }
-
+    #[cfg(feature="postgres")]
     async fn revoke_certificate_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -844,7 +864,7 @@ impl DieselDatabase {
             Ok(())
         }).await?
     }
-
+    #[cfg(feature="mysql")]
     async fn get_certificate_status_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -882,7 +902,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-
+    #[cfg(feature="postgres")]
     async fn get_certificate_status_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -957,7 +977,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-
+    #[cfg(feature="mysql")]
     async fn list_certificates_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -1006,7 +1026,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-
+    #[cfg(feature="postgres")]
     async fn list_certificates_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -1111,7 +1131,9 @@ impl Database for DieselDatabase {
         revoked: bool,
     ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => self.check_cert_mysql(pool, certnum, revoked).await,
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.check_cert_postgres(pool, certnum, revoked).await
             }
@@ -1123,7 +1145,9 @@ impl Database for DieselDatabase {
 
     fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => self.create_tables_if_needed_mysql(pool),
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => self.create_tables_if_needed_postgres(pool),
             DatabaseConnection::SQLite(pool) => self.create_tables_if_needed_sqlite(pool),
         }
@@ -1131,7 +1155,9 @@ impl Database for DieselDatabase {
 
     async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => self.add_certificate_mysql(pool, cert_num).await,
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.add_certificate_postgres(pool, cert_num).await
             }
@@ -1151,10 +1177,12 @@ impl Database for DieselDatabase {
         }
 
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => {
                 self.revoke_certificate_mysql(pool, cert_num, revocation_time, reason)
                     .await
             }
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.revoke_certificate_postgres(pool, cert_num, revocation_time, reason)
                     .await
@@ -1171,9 +1199,11 @@ impl Database for DieselDatabase {
         cert_num: &str,
     ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => {
                 self.get_certificate_status_mysql(pool, cert_num).await
             }
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.get_certificate_status_postgres(pool, cert_num).await
             }
@@ -1188,7 +1218,9 @@ impl Database for DieselDatabase {
         status: Option<String>,
     ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
         match &self.connection {
+            #[cfg(feature="mysql")]
             DatabaseConnection::MySQL(pool) => self.list_certificates_mysql(pool, status).await,
+            #[cfg(feature="postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.list_certificates_postgres(pool, status).await
             }
@@ -1202,93 +1234,4 @@ pub fn create_database(
 ) -> Result<Box<dyn Database>, Box<dyn Error + Send + Sync>> {
     let db = DieselDatabase::new(config)?;
     Ok(Box::new(db))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mockall::*;
-
-    mock! {
-        pub Database {}
-
-        #[async_trait]
-        impl Database for Database {
-            async fn check_cert(
-                &self,
-                certnum: &str,
-                revoked: bool,
-            ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>>;
-
-            fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>>;
-
-            async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
-
-            async fn revoke_certificate(
-                &self,
-                cert_num: &str,
-                revocation_time: NaiveDateTime,
-                reason: &str,
-            ) -> Result<(), Box<dyn Error + Send + Sync>>;
-
-            async fn get_certificate_status(&self, cert_num: &str) -> Result<Certinfo, Box<dyn Error + Send + Sync>>;
-
-            async fn list_certificates(
-                &self,
-                status: Option<String>,
-            ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>>;
-        }
-    }
-
-    #[test]
-    fn test_database_type_from_string() {
-        assert!(matches!(
-            DatabaseType::from_string("mysql"),
-            DatabaseType::MySQL
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("MySQL"),
-            DatabaseType::MySQL
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("postgresql"),
-            DatabaseType::PostgreSQL
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("postgres"),
-            DatabaseType::PostgreSQL
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("PostgreSQL"),
-            DatabaseType::PostgreSQL
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("sqlite"),
-            DatabaseType::SQLite
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("SQLite"),
-            DatabaseType::SQLite
-        ));
-        assert!(matches!(
-            DatabaseType::from_string("unknown"),
-            DatabaseType::MySQL
-        ));
-    }
-
-    #[test]
-    fn test_default_table_names() {
-        assert_eq!(
-            DatabaseType::MySQL.default_table_name(),
-            DEFAULT_MYSQL_TABLE
-        );
-        assert_eq!(
-            DatabaseType::PostgreSQL.default_table_name(),
-            DEFAULT_POSTGRES_TABLE
-        );
-        assert_eq!(
-            DatabaseType::SQLite.default_table_name(),
-            DEFAULT_SQLITE_TABLE
-        );
-    }
 }

@@ -2,8 +2,9 @@ extern crate rocket;
 
 use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
-use clap::Parser;
+use clap::{Parser, crate_authors};
 use config_file::FromConfigFile;
+use core::str;
 use log::{debug, error, info, trace, warn};
 use ocsp::common::asn1::Bytes;
 use ocsp::common::ocsp::{OcspExt, OcspExtI};
@@ -20,28 +21,50 @@ use ocsp::{
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 use pem::parse;
-use r#struct::*;
 use ring::digest::SHA1_FOR_LEGACY_USE_ONLY;
 use ring::{rand, signature};
-use rocket::http::ContentType;
 use rocket::State;
-use rocket::{data::ToByteUnit, Data};
+use rocket::http::ContentType;
+use rocket::{Data, data::ToByteUnit};
 use rocket::{get, launch, post, routes};
 use std::error::Error;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use r#struct::*;
 use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
-
+//#[cfg(feature = "api")]
 mod api;
 mod database;
 mod r#struct;
-
+#[cfg(test)]
+#[path = "./tests/test.rs"]
+mod test;
 use database::Database;
+#[derive(Parser, Debug)]
+#[clap(
+    author = crate_authors!("\n"),
+    before_help = "OCSP server, listening for requests to give responses.",
+    after_help = "This script is maintained on Github.",
+    help_template = "\
+    {name} {version}
+    Authors: {author-section}
+    {before-help}
+    About: {about-with-newline}
+    {usage-heading} {usage}
+
+    {all-args}{after-help}
+    "
+)]
+#[command(version, author, about, long_about = None)]
+struct Cli {
+    #[arg(default_value = "config.toml")]
+    config_path: PathBuf,
+}
 
 fn signresponse(
     issuer_hash: &[u8],
@@ -182,7 +205,6 @@ async fn upload2(
 ) -> io::Result<(ContentType, Vec<u8>)> {
     upload(config, db, data, address).await
 }
-
 #[get("/<_..>", data = "<data>")]
 async fn upload(
     state: &State<Arc<Config>>,
@@ -356,7 +378,7 @@ async fn upload(
         Some(extensions)
     };
     let needthecert: Option<Vec<Bytes>> = if needthecert {
-        Some(vec![state.cert.clone()])
+        Some(vec![state.cert.to_vec()])
     } else {
         None
     };
@@ -411,34 +433,26 @@ where
         return Ok(key_pair);
     }
 
-    let pem_str = String::from_utf8_lossy(data.as_ref());
-
-    if pem_str.contains("-----BEGIN RSA PRIVATE KEY-----") {
-        match convert_rsa_pem_to_pkcs8(&pem_str) {
-            Ok(pkcs8_der) => match ring::signature::RsaKeyPair::from_pkcs8(&pkcs8_der) {
-                Ok(key_pair) => return Ok(key_pair),
-                Err(e) => {
-                    return Err(format!(
-                        "Error creating KeyPair from converted PKCS#8: {}",
-                        e
-                    ))
-                }
-            },
-            Err(e) => return Err(format!("RSA PEM conversion error: {}", e)),
+    match str::from_utf8(data.as_ref()) {
+        Ok(s) => {
+            //PEM format so we try to parse
+            match convert_rsa_pem_to_pkcs8(s) {
+                Ok(k) => match ring::signature::RsaKeyPair::from_pkcs8(&k) {
+                    Ok(key_pair) => Ok(key_pair),
+                    Err(e) => Err(format!("Error creating KeyPair from PEM PKCS#8: {}", e)),
+                },
+                Err(_) => Err("Error creating KeyPair from PEM.".to_string()),
+            }
         }
-    } else if pem_str.contains("-----BEGIN PRIVATE KEY-----") {
-        match pem::parse(pem_str.as_bytes()) {
-            Ok(pem) => match ring::signature::RsaKeyPair::from_pkcs8(pem.contents()) {
-                Ok(key_pair) => return Ok(key_pair),
-                Err(e) => return Err(format!("Error creating KeyPair from PEM PKCS#8: {}", e)),
-            },
-            Err(e) => return Err(format!("PEM parsing error: {}", e)),
+        Err(_) => {
+            //Binary so we hope it's DER key, else fail
+            match ring::signature::RsaKeyPair::from_der(data.as_ref()) {
+                Ok(key_pair) => Ok(key_pair),
+                Err(e) => Err(format!("Error creating KeyPair from DER: {}", e)),
+            }
         }
     }
-
-    Err("Unsupported key format. Only RSA keys are supported per RFC 6960".to_string())
 }
-
 fn convert_rsa_pem_to_pkcs8(
     pem_str: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
@@ -448,13 +462,10 @@ fn convert_rsa_pem_to_pkcs8(
     Ok(pkey.private_key_to_pkcs8()?)
 }
 
-fn pem_to_der(pem_str: &str) -> Vec<u8> {
+fn pem_to_der(pem_str: &str) -> Result<Vec<u8>, String> {
     match parse(pem_str.as_bytes()) {
-        Ok(pem) => pem.contents().to_vec(),
-        Err(e) => {
-            eprintln!("Error parsing PEM: {}", e);
-            panic!("Invalid PEM format")
-        }
+        Ok(pem) => Ok(pem.contents().to_vec()),
+        Err(e) => Err(format!("Error parsing PEM: {}", e)),
     }
 }
 
@@ -465,35 +476,52 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let config_path = &cli.config_path;
 
     if !Path::new(config_path).exists() {
-        panic!("Config file not found at: {}", config_path);
+        panic!("Config file not found at: {}", config_path.display());
     }
 
     let config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            panic!("Error reading config file at {}: {}", config_path, e);
+            panic!(
+                "Error reading config file at {}: {}",
+                config_path.display(),
+                e
+            );
         }
     };
-
-    let file = fs::read_to_string(&config.itcert).expect("Intermediate cert is not found");
-    let file2 = pem_to_der(&file);
-    let certpem = x509_parser::pem::parse_x509_pem(file.as_bytes())
-        .expect("Invalid intermediate certificate.")
-        .1;
-    let certpem = certpem
-        .parse_x509()
-        .expect("Invalid intermediate certificate.");
-    let isocsp = certpem
+    let cert_raw = match File::open(&config.itcert) {
+        Ok(mut f) => {
+            let mut data = String::new();
+            f.read_to_string(&mut data)
+                .expect("Cannot read intermediate cert");
+            data
+        }
+        Err(e) => {
+            panic!("Intermediate cert is not found. Error is {}", e);
+        }
+    };
+    let (certder, cert) = match x509_parser::pem::parse_x509_pem(cert_raw.as_bytes()) {
+        Ok(e) => (pem_to_der(&cert_raw).expect("Cannot parse intermediate certificate"), e),
+        Err(_) => {
+            panic!("Cannot parse intermediate certificate")
+        }
+    };
+    let cert = cert.1.parse_x509().unwrap();
+    let isocsp = cert
         .extended_key_usage()
         .unwrap()
         .is_some_and(|f| f.value.ocsp_signing || f.value.any);
-    if !isocsp {
+    let isca = cert.is_ca();
+    if !isocsp && !isca {
+        panic!(
+            "Your certificate does not have OCSP signing extended key usage and is not a CA, it cannot sign response. Exiting"
+        );
+    } else if !isocsp {
         eprintln!(
             "Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response."
         )
     }
-
-    let parsed = certpem
+    let parsed = cert
         .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
         .unwrap()
         .unwrap()
@@ -507,7 +535,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
 
     // For an unknown reason, subject key identifier is not equal to SHA1 hash key so it is used instead.
     let authoritykey = format!("{:x}", issuerkey).to_uppercase().replace(":", "");
-    let certpempublickey = &certpem.public_key().subject_public_key.data;
+    let certpempublickey = &cert.public_key().subject_public_key.data;
     let sha1key = ring::digest::digest(&SHA1_FOR_LEGACY_USE_ONLY, certpempublickey);
 
     // Read private key and zero it after use
@@ -539,6 +567,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         .db_type
         .clone()
         .unwrap_or_else(|| "mysql".to_string());
+    #[cfg(any(feature = "mysql",feature="postgres"))]
     let dbport = match db_type.as_str() {
         "postgres" | "postgresql" => config.dbport.or(Some(DEFAULT_POSTGRES_PORT)),
         _ => config.dbport.or(Some(DEFAULT_MYSQL_PORT)),
@@ -552,7 +581,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
             isocsp,
         ),
         revocextended: config.revocextended.unwrap_or(false),
-        cert: file2,
+        cert: certder,
         time: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
         rsakey,
         cachefolder: config.cachefolder.clone(),
@@ -563,6 +592,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         dbpassword: config.dbpassword.clone(),
         dbname: config.dbname.clone(),
         db_type,
+        #[cfg(any(feature = "mysql",feature="postgres"))]
         dbport,
         create_table: config.create_table.unwrap_or(false),
         table_name: config.table_name.clone(),
@@ -602,17 +632,16 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         .mount("/", routes![upload2])
         .manage(config.clone())
         .manage(db as Box<dyn Database>);
-
-    // Add API routes if enabled
-    if config.enable_api {
-        info!("API functionality is enabled");
-        if config.api_keys.is_none() || config.api_keys.as_ref().unwrap().is_empty() {
-            warn!("API is enabled but no API keys are configured - this is insecure");
+    if cfg!(feature = "api") {
+        if config.enable_api {
+            info!("API functionality is enabled");
+            if config.api_keys.is_none() || config.api_keys.as_ref().unwrap().is_empty() {
+                warn!("API is enabled but no API keys are configured - this is insecure and will lead to failure.");
+            }
+            rocket_builder = rocket_builder.mount("/api", api::api_routes());
+        } else {
+            info!("API functionality is disabled");
         }
-        rocket_builder = rocket_builder.mount("/api", api::api_routes());
-    } else {
-        info!("API functionality is disabled");
     }
-
     rocket_builder
 }

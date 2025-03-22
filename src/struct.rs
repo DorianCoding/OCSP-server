@@ -1,8 +1,11 @@
 use chrono::NaiveDateTime;
+//use chrono::NaiveDateTime;
 use clap::{crate_authors, Parser};
 use diesel::QueryableByName;
 use ocsp::common::asn1::Bytes;
+//use ocsp::common::asn1::Bytes;
 use serde::{Deserialize, Serialize};
+//use x509_parser::prelude::X509Certificate;
 use zeroize::Zeroize;
 
 #[derive(Parser, Debug)]
@@ -28,13 +31,17 @@ pub(crate) struct Cli {
 
 pub(crate) const CACHEFORMAT: &str = "%Y-%m-%d-%H-%M-%S";
 pub(crate) const DEFAULT_PORT: u16 = 9000;
-pub(crate) const DEFAULT_LISTEN_IP: &str = "127.0.0.1";
+pub(crate) const DEFAULT_LISTEN_IP: &str = "localhost";
 pub(crate) const DEFAULT_TIMEOUT: u8 = 5;
+#[cfg(feature = "mysql")]
 pub(crate) const DEFAULT_MYSQL_PORT: u16 = 3306;
+#[cfg(feature = "postgres")]
 pub(crate) const DEFAULT_POSTGRES_PORT: u16 = 5432;
-pub(crate) const DEFAULT_MYSQL_TABLE: &str = "list_certs";
-pub(crate) const DEFAULT_POSTGRES_TABLE: &str = "ocsp_list_certs";
-pub(crate) const DEFAULT_SQLITE_TABLE: &str = "ocsp_list_certs";
+#[cfg(feature = "mysql")]
+pub(crate) const DEFAULT_MYSQL_TABLE: &str = DEFAULT_SQLITE_TABLE;
+#[cfg(feature = "postgres")]
+pub(crate) const DEFAULT_POSTGRES_TABLE: &str = DEFAULT_SQLITE_TABLE;
+pub(crate) const DEFAULT_SQLITE_TABLE: &str = "list_certs";
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -50,6 +57,7 @@ pub(crate) struct Config {
     pub(crate) dbpassword: String,
     pub(crate) dbname: String,
     pub(crate) db_type: String,
+    #[cfg(any(feature = "mysql",feature="postgres"))]
     pub(crate) dbport: Option<u16>,
     pub(crate) create_table: bool,
     pub(crate) cachefolder: String,
@@ -84,6 +92,7 @@ pub(crate) struct Fileconfig {
     pub(crate) dbpassword: String,
     pub(crate) dbname: String,
     pub(crate) db_type: Option<String>,
+    #[allow(dead_code)]
     pub(crate) dbport: Option<u16>,
     pub(crate) create_table: Option<bool>,
     pub(crate) cachefolder: String,
@@ -125,7 +134,7 @@ pub(crate) struct CertRecord {
     #[diesel(sql_type = diesel::sql_types::Text)]
     pub(crate) status: String,
 }
-
+#[cfg(feature = "postgres")]
 #[derive(Debug, QueryableByName)]
 pub(crate) struct BoolResult {
     #[diesel(sql_type = diesel::sql_types::Bool)]
@@ -135,25 +144,24 @@ pub(crate) struct BoolResult {
 // API Authentication
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct ApiKey(pub String);
+pub(crate) struct ApiKey(pub(crate) String);
 
 // API Request and Response Structures
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CertificateRequest {
+pub(crate) struct CertificateRequest {
     pub cert_num: String,
 }
-
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RevocationRequest {
-    pub cert_num: String,
-    pub reason: String,
+pub(crate) struct RevocationRequest {
+    pub(crate) cert_num: String,
+    pub(crate) reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub revocation_time: Option<NaiveDateTime>,
+    pub(crate) revocation_time: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CertificateResponse {
-    pub cert_num: String,
-    pub status: String,
-    pub message: String,
+pub(crate) struct CertificateResponse {
+    pub(crate) cert_num: String,
+    pub(crate) status: String,
+    pub(crate) message: String,
 }

@@ -1,10 +1,18 @@
-use crate::rocket;
+use crate::database::DatabaseType;
+use crate::{rocket, DEFAULT_SQLITE_TABLE};
+#[cfg(feature = "mysql")]
+use crate::DEFAULT_MYSQL_TABLE;
+#[cfg(feature = "postgres")]
+use crate::DEFAULT_POSTGRES_TABLE;
 use crate::{Cli, Fileconfig, getprivatekey};
 use clap::Parser;
 use config_file::FromConfigFile;
+use mockall::*;
 use ring::{rand, signature};
+use rocket::async_trait;
 use std::{fs, path::Path};
 use zeroize::Zeroize;
+use crate::Database;
 #[test]
 fn testresponse() {
     use ring::rand::SecureRandom;
@@ -46,7 +54,7 @@ fn testresponse() {
 }
 #[test]
 #[should_panic(
-    expected = "called `Result::unwrap()` on an `Err` value: KeyRejected(\"InvalidEncoding\")"
+    expected = "Error creating KeyPair from PEM."
 )]
 fn checkconfigfake() {
     let cli = Cli::parse();
@@ -54,13 +62,13 @@ fn checkconfigfake() {
     let config_path = &cli.config_path;
 
     if !Path::new(config_path).exists() {
-        panic!("Config file not found at: {}", config_path);
+        panic!("Config file not found at: {}", config_path.display());
     }
 
     let mut config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            panic!("Error reading config file at {}: {}", config_path, e);
+            panic!("Error reading config file at {}: {}", config_path.display(), e);
         }
     };
     config.itkey = String::from("test_files/key.pem");
@@ -73,4 +81,88 @@ fn checkconfigfake() {
 #[test]
 fn checkconfig() {
     rocket();
+}
+mock! {
+    pub Database {}
+
+    #[async_trait]
+    impl Database for Database {
+        async fn check_cert(
+            &self,
+            certnum: &str,
+            revoked: bool,
+        ) -> Result<ocsp::response::CertStatus, Box<dyn std::error::Error + Send + Sync>>;
+
+        fn create_tables_if_needed(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+        async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+        async fn revoke_certificate(
+            &self,
+            cert_num: &str,
+            revocation_time: chrono::NaiveDateTime,
+            reason: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+        async fn get_certificate_status(&self, cert_num: &str) -> Result<crate::Certinfo, Box<dyn std::error::Error + Send + Sync>>;
+
+        async fn list_certificates(
+            &self,
+            status: Option<String>,
+        ) -> Result<Vec<crate::CertificateResponse>, Box<dyn std::error::Error + Send + Sync>>;
+    }
+}
+
+#[test]
+fn test_database_type_from_string() {
+    assert!(matches!(
+        DatabaseType::from_string("mysql"),
+        DatabaseType::MySQL
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("MySQL"),
+        DatabaseType::MySQL
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("postgresql"),
+        DatabaseType::PostgreSQL
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("postgres"),
+        DatabaseType::PostgreSQL
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("PostgreSQL"),
+        DatabaseType::PostgreSQL
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("sqlite"),
+        DatabaseType::SQLite
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("SQLite"),
+        DatabaseType::SQLite
+    ));
+    assert!(matches!(
+        DatabaseType::from_string("unknown"),
+        DatabaseType::SQLite
+    ));
+}
+
+#[test]
+fn test_default_table_names() {
+    #[cfg(feature="mysql")]
+    assert_eq!(
+        DatabaseType::MySQL.default_table_name(),
+        DEFAULT_MYSQL_TABLE
+    );
+    #[cfg(feature="postgres")]
+    assert_eq!(
+        DatabaseType::PostgreSQL.default_table_name(),
+        DEFAULT_POSTGRES_TABLE
+    );
+    assert_eq!(
+        DatabaseType::SQLite.default_table_name(),
+        DEFAULT_SQLITE_TABLE
+    );
 }
