@@ -5,12 +5,19 @@ pkgs.mkShell {
     rustc
     cargo
     cargo-audit
+    clippy
     rustfmt
     rust-analyzer
+    git
+    openssl
+    libmysqlclient
+    sqlite
+    postgresql
+    pkg-config
   ];
 
   shellHook = ''
-    rustfmt --edition 2024 src/main.rs
+    rustfmt --edition 2024 src/*.rs
     cargo audit
   '';
 
