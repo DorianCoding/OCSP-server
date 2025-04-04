@@ -7,7 +7,7 @@
 
 ----
 
-This software implements a OCSP responder in Rust, fetching certificate status in a Mysql/MariaDB database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port. 
+This software implements a OCSP responder in Rust, fetching certificate status in a Mysql/MariaDB database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port.
 *It will answer to any **GET or POST** requests on any URL*.
 ## Requirements
 - A CA certificate (self-signed allowed) and/or an intermediate CA that will sign leaf certificates.
@@ -30,16 +30,23 @@ The config file should contain the following informations :
 #Config file, all fields are compulsory
 cachedays = 3 #Number of days a response is valid once created (only for valid certificates)
 dbip = "127.0.0.1" #Optional. IP to connect to MySql database. If absent, use of unix socket.
-timeout = 5 #Optional timeout, default 5s
+db_type = "mysql" # Can be "mysql" or "postgres" or "sqlite"
 dbuser = "cert" #Username to connect to MySql database
-port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service). By default 9000
+dbport = 3306 # Optional: Default 3306 for MySQL, 5432 for PostgreSQL
 dbname = "certs" #Name to connect to MySql data
 dbpassword = "certdata" #Password to connect to cert data
+port = 9000 #Port to listen to, from 1 to 65535. Cannot use a port already used by another service (privileged ports allowed if used as root or as a service). By default 9000
+listen_ip = "0.0.0.0" # Optional: IP address to listen on (default: 127.0.0.1)
+timeout = 5 #Optional timeout, default 5s
 cachefolder = "cache/" #Folder to cache data (relative or absolute, will be created if not present)
 itcert = "/var/public_files/it_cert.crt" #Path to intermediate certificate as PEM format
+itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret (PKCS#8 format, only RSA keys supported so far)
 revocextended = true #Optional, if you want to enable EXTENDED_REVOCATION
 caching = true #Optional, enable caching or enable nonce response.
-itkey = "/var/private_files/it_privkey.pem" #Path to intermediate private key, keep it secret (PKCS#8 format, only RSA keys supported so far)
+create_table = true # Optional: Creates the table if it doesn't exist
+table_name = "custom_certs" # Optional: Custom table name (default is list_certs for MySQL, ocsp_list_certs for PostgreSQL)
+enable_api = true # Optional: Enable the certificate management API
+api_keys = ["secure-api-key-1", "secure-api-key-2"] # Optional: List of valid API keys for authentication
 ```
 
 > [!CAUTION]
@@ -168,15 +175,15 @@ OCSP Response Data:
 
 > OCSP Server - OCSP responder in Rust
 > Copyright (C) 2023 DorianCoding
-> 
+>
 > This program is free software: you can redistribute it and/or modify
 > it under the terms of the GNU General Public License as published by
 > the Free Software Foundation, under version 3 of the License only.
-> 
+>
 > This program is distributed in the hope that it will be useful,
 > but WITHOUT ANY WARRANTY; without even the implied warranty of
 > MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 > GNU General Public License for more details.
-> 
+>
 > You should have received a copy of the GNU General Public License
 > along with this program.  If not, see <https://www.gnu.org/licenses/>.
