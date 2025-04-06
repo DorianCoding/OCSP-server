@@ -2,10 +2,10 @@
 name = "ocsp-server"
 authors = ["DorianCoding <108593662+DorianCoding@users.noreply.github.com>"]
 description = "OCSP server, listening for requests to give responses."
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
-license = "GPL-3.0-only"
 rust-version = "1.85"
+license = "GPL-3.0-only"
 repository = "https://github.com/DorianCoding/OCSP_server"
 keywords = ["ocsp", "server", "ocsp-response"]
 categories = ["caching", "cryptography"]
@@ -17,22 +17,38 @@ exclude = [
 
 [dependencies]
 clap = { version = "4.5.32", features = ["derive", "cargo"] }
-chrono = { version = "~0.4.40", default-features = false, features = ["std"]}
+chrono = { version = "~0.4.31", default-features = false, features = ["std", "serde"]}
 config-file = "~0.2.3"
-hex = "~0.4.3"
-mysql = { version = "~26.0.0", default-features = false, features = ["minimal"]}
-ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
-#ocsp = {git = "https://github.com/maicallist/ocsp-rs.git" }
-pem = "3.0.5"
-#openssl-sys = { version = "~0.9.103", features = ["vendored" ]}
-ring = "0.17.14"
-rocket = "~0.5.1"
 serde = "~1.0.219"
+diesel = { version = "2.2.8", features = ["sqlite", "r2d2", "chrono"] }
+r2d2 = "0.8.10"
+ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
+pem = "3.0.5"
+openssl = { version = "0.10.71", features = ["vendored"] }
+ring = "0.17.14"
 x509-parser = "~0.17.0"
+hex = "~0.4.3"
 zeroize = { version = "~1.8.1", features = ["std", "zeroize_derive"] }
+log = "0.4.20"
+async-trait = "0.1.79"
+tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }
 
+[dependencies.rocket]
+version = "0.5.1"
+features = ["json"]
+
+[dev-dependencies]
+mockall = "0.12.1"
+[features]
+api=[]
+mysql = ["diesel/mysql"]
+postgres = ["diesel/postgres"]
+default = ["api","mysql","postgres"]
 [profile.release]
 strip = "symbols"
+lto = true
+codegen-units = 1
+opt-level = 3
 
 [lints.rust]
 unsafe_code = "deny"
