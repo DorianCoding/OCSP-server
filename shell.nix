@@ -5,6 +5,7 @@ pkgs.mkShell {
     rustc
     cargo
     cargo-audit
+    clippy
     rustfmt
     rust-analyzer
     git

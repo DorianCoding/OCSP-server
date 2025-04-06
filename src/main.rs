@@ -2,7 +2,7 @@ extern crate rocket;
 
 use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
-use clap::{Parser, crate_authors};
+use clap::{CommandFactory, Parser};
 use config_file::FromConfigFile;
 use core::str;
 use log::{debug, error, info, trace, warn};
@@ -237,7 +237,7 @@ async fn upload(
                 ocsp::common::ocsp::OcspExt::Nonce { nonce } => Some(nonce.len()),
                 _ => None,
             })
-            .last()
+            .next_back()
     }) {
         Some(1..128) | None => (),
         _ => {
@@ -476,17 +476,25 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let config_path = &cli.config_path;
 
     if !Path::new(config_path).exists() {
-        panic!("Config file not found at: {}", config_path.display());
+        eprintln!("Error: Config file not found at: {}", config_path);
+        eprintln!("\nUsage information:");
+        let mut cli_command = Cli::command();
+        if let Err(err) = cli_command.print_help() {
+            eprintln!("Could not display help: {}", err);
+        }
+        std::process::exit(1);
     }
 
     let config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            panic!(
-                "Error reading config file at {}: {}",
-                config_path.display(),
-                e
-            );
+            eprintln!("Error: Reading config file at {}: {}", config_path, e);
+            eprintln!("\nUsage information:");
+            let mut cli_command = Cli::command();
+            if let Err(err) = cli_command.print_help() {
+                eprintln!("Could not display help: {}", err);
+            }
+            std::process::exit(1);
         }
     };
     let cert_raw = match File::open(&config.itcert) {
@@ -561,6 +569,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         .listen_ip
         .clone()
         .unwrap_or_else(|| DEFAULT_LISTEN_IP.to_string());
+
 
     // Determine database type and default port
     let db_type = config
