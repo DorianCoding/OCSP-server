@@ -2,7 +2,7 @@
 name = "ocsp-server"
 authors = ["DorianCoding <108593662+DorianCoding@users.noreply.github.com>"]
 description = "OCSP server, listening for requests to give responses."
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-only"
