@@ -5,6 +5,7 @@ use chrono::{DateTime, Datelike, FixedOffset};
 use clap::{CommandFactory, Parser};
 use config_file::FromConfigFile;
 use core::str;
+use clap::crate_authors;
 use log::{debug, error, info, trace, warn};
 use ocsp::common::asn1::Bytes;
 use ocsp::common::ocsp::{OcspExt, OcspExtI};
@@ -361,7 +362,7 @@ async fn upload(
             error!("Error creating OCSP response.");
             debug!(
                 "Error creating OCSP response: {}",
-                resp.unwrap_err().to_string()
+                resp.unwrap_err()
             );
             return Ok((
                 custom,
@@ -476,7 +477,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let config_path = &cli.config_path;
 
     if !Path::new(config_path).exists() {
-        eprintln!("Error: Config file not found at: {}", config_path);
+        eprintln!("Error: Config file not found at: {}", config_path.display());
         eprintln!("\nUsage information:");
         let mut cli_command = Cli::command();
         if let Err(err) = cli_command.print_help() {
@@ -488,7 +489,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Error: Reading config file at {}: {}", config_path, e);
+            eprintln!("Error: Reading config file at {}: {}", config_path.display(), e);
             eprintln!("\nUsage information:");
             let mut cli_command = Cli::command();
             if let Err(err) = cli_command.print_help() {
