@@ -24,7 +24,7 @@ diesel = { version = "2.2.8", features = ["sqlite", "r2d2", "chrono"] }
 r2d2 = "0.8.10"
 ocsp = {git = "https://github.com/DorianCoding/ocsp-rs.git", tag="1.0.0" }
 pem = "3.0.5"
-openssl = { version = "0.10.71", features = ["vendored"] }
+openssl = { version = "0.10.72", features = ["vendored"] }
 ring = "0.17.14"
 x509-parser = "~0.17.0"
 hex = "~0.4.3"
