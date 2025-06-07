@@ -8,7 +8,7 @@
 ----
 
 This software implements a OCSP responder in Rust, fetching certificate status in a Mysql/MariaDB database. Unlike the Python implementation, it **does implement its own TCP listener** on a user-selected port.
-*It will answer to any **GET or POST** requests on any URL*.
+*It will answer to any **GET or POST** requests on the root URL or /ocsp URL*. If you need other routes, please configure a reverse proxy.
 ## Requirements
 - A CA certificate (self-signed allowed) and/or an intermediate CA that will sign leaf certificates.
 - A config file (config.toml) in the same directory. As well, files indicated in this file must also be accessible.

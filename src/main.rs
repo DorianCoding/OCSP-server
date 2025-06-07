@@ -2,10 +2,10 @@ extern crate rocket;
 
 use chrono::{self, NaiveDateTime, Timelike};
 use chrono::{DateTime, Datelike, FixedOffset};
+use clap::crate_authors;
 use clap::{CommandFactory, Parser};
 use config_file::FromConfigFile;
 use core::str;
-use clap::crate_authors;
 use log::{debug, error, info, trace, warn};
 use ocsp::common::asn1::Bytes;
 use ocsp::common::ocsp::{OcspExt, OcspExtI};
@@ -19,6 +19,7 @@ use ocsp::{
         ResponderId, ResponseBytes, ResponseData,
     },
 };
+use openssl::base64;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 use pem::parse;
@@ -196,7 +197,21 @@ fn addtocache(
     let path = Path::new(&long);
     fs::write(path, response)
 }
-
+#[get("/ssl/ocsp.php?<cert>")]
+async fn upload3(
+    config: &State<Arc<Config>>,
+    db: &State<Box<dyn Database>>,
+    cert: String,
+    address: SocketAddr,
+) -> io::Result<(ContentType, Vec<u8>)> {
+    answer(
+        db,
+        base64::decode_block(&cert).unwrap_or_default(),
+        address,
+        config,
+    )
+    .await
+}
 #[post("/<_..>", data = "<data>")]
 async fn upload2(
     config: &State<Arc<Config>>,
@@ -206,30 +221,35 @@ async fn upload2(
 ) -> io::Result<(ContentType, Vec<u8>)> {
     upload(config, db, data, address).await
 }
-#[get("/<_..>", data = "<data>")]
-async fn upload(
-    state: &State<Arc<Config>>,
+async fn answer(
     db: &State<Box<dyn Database>>,
-    data: Data<'_>,
+    vec: Vec<u8>,
     address: SocketAddr,
+    state: &State<Arc<Config>>,
 ) -> io::Result<(ContentType, Vec<u8>)> {
     let custom = ContentType::new("application", "ocsp-response");
-    let stream = data.open(3.mebibytes());
-    let string = stream.into_bytes().await?;
-    let vec = string.into_inner();
     let ocsp_request = match OcspRequest::parse(&vec) {
         Ok(r) => {
             trace!("Got a request from {}", address.ip());
             r
         }
-        Err(e) => {
-            warn!("Unable to parse ocsp request from {}", address.ip());
-            debug!("Unable to parse ocsp request, due to {e}.");
-            return Ok((
-                custom,
-                signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
-            ));
-        }
+        Err(_) => match OcspRequest::parse(
+            &base64::decode_block(String::from_utf8(vec).unwrap_or_default().as_str())
+                .unwrap_or_default(),
+        ) {
+            Ok(r) => {
+                trace!("Got a request as BASE64 from {}", address.ip());
+                r
+            }
+            Err(e) => {
+                warn!("Unable to parse ocsp request from {}", address.ip());
+                debug!("Unable to parse ocsp request, due to {e}.");
+                return Ok((
+                    custom,
+                    signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
+                ));
+            }
+        },
     };
 
     match ocsp_request.tbs_request.request_ext.clone().and_then(|p| {
@@ -336,7 +356,7 @@ async fn upload(
                     }
                 }
             }
-            (.., true, false) if !state.issuer_hash.2 => {
+            (.., true, false) => {
                 error!(
                     "Certificate used has not OCSP signing extended key usage and cannot sign OCSP!"
                 );
@@ -353,17 +373,24 @@ async fn upload(
                     hex::encode(&state.issuer_hash.0),
                     hex::encode(&state.issuer_hash.1)
                 );
-                CertStatus::new(CertStatusCode::Unknown, None)
+                if state.revocextended {
+                    CertStatus::new(
+                        CertStatusCode::Revoked,
+                        Some(ocsp::response::RevokedInfo::new(
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            Some(ocsp::response::CrlReason::OcspRevokeCertHold),
+                        )),
+                    )
+                } else {
+                    CertStatus::new(CertStatusCode::Unknown, None)
+                }
             }
         };
 
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
         if resp.is_err() {
             error!("Error creating OCSP response.");
-            debug!(
-                "Error creating OCSP response: {}",
-                resp.unwrap_err()
-            );
+            debug!("Error creating OCSP response: {}", resp.unwrap_err());
             return Ok((
                 custom,
                 signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
@@ -424,6 +451,18 @@ async fn upload(
     }
     info!("Send response for {} to {}", &certnum, address.ip());
     Ok((custom, response))
+}
+#[get("/<_..>", data = "<data>")]
+async fn upload(
+    state: &State<Arc<Config>>,
+    db: &State<Box<dyn Database>>,
+    data: Data<'_>,
+    address: SocketAddr,
+) -> io::Result<(ContentType, Vec<u8>)> {
+    let stream = data.open(3.mebibytes());
+    let string = stream.into_bytes().await?;
+    let vec = string.into_inner();
+    answer(db, vec, address, state).await
 }
 
 fn getprivatekey<T>(data: T) -> Result<ring::signature::RsaKeyPair, String>
@@ -489,7 +528,11 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("Error: Reading config file at {}: {}", config_path.display(), e);
+            eprintln!(
+                "Error: Reading config file at {}: {}",
+                config_path.display(),
+                e
+            );
             eprintln!("\nUsage information:");
             let mut cli_command = Cli::command();
             if let Err(err) = cli_command.print_help() {
@@ -510,7 +553,10 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         }
     };
     let (certder, cert) = match x509_parser::pem::parse_x509_pem(cert_raw.as_bytes()) {
-        Ok(e) => (pem_to_der(&cert_raw).expect("Cannot parse intermediate certificate"), e),
+        Ok(e) => (
+            pem_to_der(&cert_raw).expect("Cannot parse intermediate certificate"),
+            e,
+        ),
         Err(_) => {
             panic!("Cannot parse intermediate certificate")
         }
@@ -560,8 +606,15 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
             panic!("Key loading failed");
         }
     };
+    let givenkey = openssl::pkey::PKey::private_key_from_pkcs8(&key).unwrap();
+    let certkey = openssl::x509::X509::from_der(&certder)
+        .unwrap()
+        .public_key()
+        .unwrap();
+    if !certkey.public_eq(&givenkey) {
+        panic!("Key does not match certificate. Exiting!");
+    }
     key.zeroize();
-
     // Get HTTP port
     let port = config.port.unwrap_or(DEFAULT_PORT);
 
@@ -571,13 +624,12 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         .clone()
         .unwrap_or_else(|| DEFAULT_LISTEN_IP.to_string());
 
-
     // Determine database type and default port
     let db_type = config
         .db_type
         .clone()
         .unwrap_or_else(|| "mysql".to_string());
-    #[cfg(any(feature = "mysql",feature="postgres"))]
+    #[cfg(any(feature = "mysql", feature = "postgres"))]
     let dbport = match db_type.as_str() {
         "postgres" | "postgresql" => config.dbport.or(Some(DEFAULT_POSTGRES_PORT)),
         _ => config.dbport.or(Some(DEFAULT_MYSQL_PORT)),
@@ -602,7 +654,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         dbpassword: config.dbpassword.clone(),
         dbname: config.dbname.clone(),
         db_type,
-        #[cfg(any(feature = "mysql",feature="postgres"))]
+        #[cfg(any(feature = "mysql", feature = "postgres"))]
         dbport,
         create_table: config.create_table.unwrap_or(false),
         table_name: config.table_name.clone(),
@@ -640,13 +692,16 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         .configure(figment)
         .mount("/", routes![upload])
         .mount("/", routes![upload2])
+        .mount("/", routes![upload3])
         .manage(config.clone())
         .manage(db as Box<dyn Database>);
     if cfg!(feature = "api") {
         if config.enable_api {
             info!("API functionality is enabled");
             if config.api_keys.is_none() || config.api_keys.as_ref().unwrap().is_empty() {
-                warn!("API is enabled but no API keys are configured - this is insecure and will lead to failure.");
+                warn!(
+                    "API is enabled but no API keys are configured - this is insecure and will lead to failure."
+                );
             }
             rocket_builder = rocket_builder.mount("/api", api::api_routes());
         } else {
