@@ -1,6 +1,6 @@
 use chrono::NaiveDateTime;
 //use chrono::NaiveDateTime;
-use clap::{crate_authors, Parser};
+use clap::{Parser, crate_authors};
 use diesel::QueryableByName;
 use ocsp::common::asn1::Bytes;
 //use ocsp::common::asn1::Bytes;
@@ -57,7 +57,7 @@ pub(crate) struct Config {
     pub(crate) dbpassword: String,
     pub(crate) dbname: String,
     pub(crate) db_type: String,
-    #[cfg(any(feature = "mysql",feature="postgres"))]
+    #[cfg(any(feature = "mysql", feature = "postgres"))]
     pub(crate) dbport: Option<u16>,
     pub(crate) create_table: bool,
     pub(crate) cachefolder: String,

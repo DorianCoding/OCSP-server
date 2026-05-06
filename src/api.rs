@@ -5,7 +5,7 @@ use log::{error, info, warn};
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::serde::json::Json;
-use rocket::{get, post, routes, State};
+use rocket::{State, get, post, routes};
 use std::sync::Arc;
 
 pub fn api_routes() -> Vec<rocket::Route> {
@@ -174,15 +174,15 @@ async fn list_certificates(
     status: Option<String>,
     db: &State<Box<dyn Database>>,
 ) -> Result<Json<Vec<CertificateResponse>>, Status> {
-    let liststatus = ["Valid","revoked","All"];
+    let liststatus = ["Valid", "revoked", "All"];
     let filtered_status = match status {
-        Some(d) if liststatus.iter().any(|p| *p == d.as_str()) => {
+        Some(d) if liststatus.contains(&d.as_str()) => {
             if d == "All" {
                 Some(d)
             } else {
                 None
             }
-        },
+        }
         _ => {
             return Err(Status::BadRequest);
         }

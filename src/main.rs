@@ -1,3 +1,5 @@
+#![deny(clippy::panic)]
+#![deny(clippy::unwrap_used)]
 extern crate rocket;
 
 use chrono::{self, NaiveDateTime, Timelike};
@@ -19,6 +21,7 @@ use ocsp::{
         ResponderId, ResponseBytes, ResponseData,
     },
 };
+
 use openssl::base64;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
@@ -39,10 +42,14 @@ use r#struct::*;
 use x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use x509_parser::prelude::ParsedExtension;
 use zeroize::Zeroize;
-//#[cfg(feature = "api")]
+#[cfg(feature = "api")]
 mod api;
 mod database;
 mod r#struct;
+
+#[cfg(not(any(feature = "mysql", feature = "postgres")))]
+compile_error!("At least one database backend should be activated.");
+
 #[cfg(test)]
 #[path = "./tests/test.rs"]
 mod test;
@@ -84,7 +91,7 @@ fn signresponse(
     let mut signature = vec![0u8; private_key.public().modulus_len()];
     private_key
         .sign(&signature::RSA_PKCS1_SHA256, &rng, tosign, &mut signature)
-        .unwrap();
+        .map_err(|_| Box::new(io::Error::from(io::ErrorKind::InvalidData)))?;
     assert_ne!(&signature, tosign);
     let basic = BasicResponse::new(data, oid, signature, cert);
     // equivalent to
@@ -114,10 +121,10 @@ fn createocspresponse(
 ) -> Result<OneResp, Box<dyn Error>> {
     let thisupdate = thisupdate.unwrap_or(GeneralizedTime::now());
     let mut nextupdate = nextupdate;
-    if preparedate.is_some() {
+    if let Some(d) = preparedate {
         let now = chrono::offset::Utc::now();
         let elem = now
-            .checked_add_days(chrono::Days::new(u64::from(preparedate.unwrap())))
+            .checked_add_days(chrono::Days::new(u64::from(d)))
             .unwrap_or(now);
         let new = GeneralizedTime::new(
             elem.year(),
@@ -154,17 +161,19 @@ fn checkcache(state: &State<Arc<Config>>, certname: &str) -> io::Result<Option<V
                 continue;
             }
             let datetime = NaiveDateTime::parse_from_str(elem[1], CACHEFORMAT);
-            if datetime.is_err() {
+            let datetime = if let Ok(d) = datetime {
+                d
+            } else {
                 warn!("Cannot parse datetime {}", elem[1]);
                 continue;
-            }
-            let datetime = datetime.unwrap();
+            };
             let time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            if datetime.and_utc()
-                >= DateTime::from_timestamp_millis(i64::try_from(time).unwrap()).unwrap()
+                .map(|p| p.as_millis())
+                .unwrap_or(u128::MAX);
+            if let Some(d) =
+                DateTime::from_timestamp_millis(i64::try_from(time).unwrap_or(i64::MAX))
+                && d <= datetime.and_utc()
             {
                 let text = fs::read(&path)?;
                 info!("Got {} from cache", &certname);
@@ -244,10 +253,12 @@ async fn answer(
             Err(e) => {
                 warn!("Unable to parse ocsp request from {}", address.ip());
                 debug!("Unable to parse ocsp request, due to {e}.");
-                return Ok((
-                    custom,
-                    signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
-                ));
+                if let Ok(later) = signnonvalidresponse(OcspRespStatus::TryLater) {
+                    return Ok((custom, later));
+                } else {
+                    error!("Cannot send trylater request");
+                    return Err(io::Error::from(io::ErrorKind::InvalidInput));
+                }
             }
         },
     };
@@ -263,10 +274,6 @@ async fn answer(
         Some(1..128) | None => (),
         _ => {
             info!("Nonce is invalid on request by {}. Rejected.", address.ip());
-            return Ok((
-                custom,
-                signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
-            ));
         }
     }
     // get CertId from request
@@ -284,11 +291,8 @@ async fn answer(
         };
         if possible {
             let result = checkcache(state, &num);
-            if result.is_ok() {
-                let result = result.unwrap();
-                if let Some(d) = result {
-                    return Ok((custom, d));
-                }
+            if let Ok(Some(d)) = result {
+                return Ok((custom, d));
             }
         }
         let nonce = match state.caching {
@@ -307,11 +311,7 @@ async fn answer(
                                 }
                             })
                             .collect();
-                        if vec.len() != 1 {
-                            None
-                        } else {
-                            Some(vec.pop().unwrap())
-                        }
+                        vec.pop()
                     },
                 );
                 nonce.map(|d| OcspExtI {
@@ -349,10 +349,12 @@ async fn answer(
                     Ok(status) => status,
                     Err(err) => {
                         error!("Cannot query database: {}", err);
-                        return Ok((
-                            custom,
-                            signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
-                        ));
+                        if let Ok(later) = signnonvalidresponse(OcspRespStatus::TryLater) {
+                            return Ok((custom, later));
+                        } else {
+                            error!("Cannot send trylater request");
+                            CertStatus::new(CertStatusCode::Unknown, None)
+                        }
                     }
                 }
             }
@@ -360,10 +362,12 @@ async fn answer(
                 error!(
                     "Certificate used has not OCSP signing extended key usage and cannot sign OCSP!"
                 );
-                return Ok((
-                    custom,
-                    signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
-                ));
+                if let Ok(later) = signnonvalidresponse(OcspRespStatus::TryLater) {
+                    return Ok((custom, later));
+                } else {
+                    error!("Cannot send trylater request");
+                    CertStatus::new(CertStatusCode::Unknown, None)
+                }
             }
             _ => {
                 warn!(
@@ -377,7 +381,8 @@ async fn answer(
                     CertStatus::new(
                         CertStatusCode::Revoked,
                         Some(ocsp::response::RevokedInfo::new(
-                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0)
+                                .unwrap_or_else(|_| unreachable!("This date is always set.")),
                             Some(ocsp::response::CrlReason::OcspRevokeCertHold),
                         )),
                     )
@@ -388,16 +393,20 @@ async fn answer(
         };
 
         let resp = createocspresponse(cert, status, Some(state.cachedays), None, None, None);
-        if resp.is_err() {
-            error!("Error creating OCSP response.");
-            debug!("Error creating OCSP response: {}", resp.unwrap_err());
-            return Ok((
-                custom,
-                signnonvalidresponse(OcspRespStatus::TryLater).unwrap(),
-            ));
+        match resp {
+            Err(e) => {
+                error!("Error creating OCSP response.");
+                debug!("Error creating OCSP response: {}", e);
+                if let Ok(later) = signnonvalidresponse(OcspRespStatus::TryLater) {
+                    return Ok((custom, later));
+                } else {
+                    error!("Cannot send trylater request")
+                };
+            }
+            Ok(resp) => {
+                responses.push(resp);
+            }
         }
-        let resp = resp.unwrap();
-        responses.push(resp);
     }
     let certnum = num;
     let extensions = if extensions.is_empty() {
@@ -417,40 +426,48 @@ async fn answer(
         extensions,
         needthecert,
     );
-    if result.is_err() {
-        warn!(
-            "Unable to parse ocsp request, due to {:?}.",
-            result.unwrap_err()
-        );
-        return Ok((
-            custom,
-            signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
-        ));
-    }
-    let result = result.unwrap();
-    let response = signvalidresponse(result);
-    if response.is_err() {
-        error!("Cannot sign the response.");
-        return Ok((
-            custom,
-            signnonvalidresponse(OcspRespStatus::MalformedReq).unwrap(),
-        ));
-    }
-    let response = response.unwrap();
-    if possible {
-        let date = chrono::Local::now();
-        let date = date.checked_add_days(chrono::Days::new(u64::from(state.cachedays)));
-        if let Some(date) = date {
-            match addtocache(state, &certnum, date.fixed_offset(), &response) {
-                Ok(_) => (),
+    match result {
+        Err(e) => {
+            warn!("Unable to parse ocsp request, due to {:?}.", e);
+            if let Ok(later) = signnonvalidresponse(OcspRespStatus::TryLater) {
+                Ok((custom, later))
+            } else {
+                error!("Cannot send trylater request");
+                Err(io::Error::from(io::ErrorKind::InvalidData))
+            }
+        }
+        Ok(result) => {
+            let response = signvalidresponse(result);
+            match response {
                 Err(_) => {
-                    warn!("Cannot write to cache");
+                    error!("Cannot sign the response.");
+                    if let Ok(later) = signnonvalidresponse(OcspRespStatus::MalformedReq) {
+                        Ok((custom, later))
+                    } else {
+                        error!("Cannot send malformed request");
+                        Err(io::Error::from(io::ErrorKind::InvalidData))
+                    }
+                }
+                Ok(response) => {
+                    if possible {
+                        let date = chrono::Local::now();
+                        let date =
+                            date.checked_add_days(chrono::Days::new(u64::from(state.cachedays)));
+                        if let Some(date) = date {
+                            match addtocache(state, &certnum, date.fixed_offset(), &response) {
+                                Ok(_) => (),
+                                Err(_) => {
+                                    warn!("Cannot write to cache");
+                                }
+                            }
+                        }
+                    }
+                    info!("Send response for {} to {}", &certnum, address.ip());
+                    Ok((custom, response))
                 }
             }
         }
     }
-    info!("Send response for {} to {}", &certnum, address.ip());
-    Ok((custom, response))
 }
 #[get("/<_..>", data = "<data>")]
 async fn upload(
@@ -549,7 +566,8 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
             data
         }
         Err(e) => {
-            panic!("Intermediate cert is not found. Error is {}", e);
+            error!("Intermediate cert is not found. Error is {}", e);
+            std::process::exit(1);
         }
     };
     let (certder, cert) = match x509_parser::pem::parse_x509_pem(cert_raw.as_bytes()) {
@@ -558,33 +576,45 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
             e,
         ),
         Err(_) => {
-            panic!("Cannot parse intermediate certificate")
+            error!("Cannot parse intermediate certificate");
+            std::process::exit(1);
         }
     };
-    let cert = cert.1.parse_x509().unwrap();
+    let cert = match cert.1.parse_x509() {
+        Ok(e) => e,
+        Err(_) => {
+            error!("Cannot read intermediate certificate");
+            std::process::exit(1);
+        }
+    };
     let isocsp = cert
         .extended_key_usage()
-        .unwrap()
-        .is_some_and(|f| f.value.ocsp_signing || f.value.any);
+        .is_ok_and(|f| f.is_some_and(|f| f.value.ocsp_signing || f.value.any));
     let isca = cert.is_ca();
     if !isocsp && !isca {
-        panic!(
+        error!(
             "Your certificate does not have OCSP signing extended key usage and is not a CA, it cannot sign response. Exiting"
         );
+        std::process::exit(1);
     } else if !isocsp {
-        eprintln!(
+        warn!(
             "Your certificate does not have OCSP signing extended key usage. If it is not the issuer, the application won't sign the response."
         )
     }
     let parsed = cert
         .get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
-        .unwrap()
-        .unwrap()
-        .parsed_extension();
+        .map(|f| f.map(|f| f.parsed_extension()));
     let issuerkey = match parsed {
-        ParsedExtension::AuthorityKeyIdentifier(a) => a.key_identifier.as_ref().unwrap(),
+        Ok(Some(ParsedExtension::AuthorityKeyIdentifier(a))) => match a.key_identifier.as_ref() {
+            Some(a) => a,
+            None => {
+                error!("Error getting key identifier");
+                std::process::exit(1);
+            }
+        },
         _ => {
-            panic!("Error getting key");
+            error!("Error getting key");
+            std::process::exit(1);
         }
     };
 
@@ -595,24 +625,33 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
 
     // Read private key and zero it after use
     let mut key = fs::read(&config.itkey).unwrap_or_else(|e| {
-        panic!("Error reading key file: {}", e);
+        error!("Error reading key file: {}", e);
+        std::process::exit(1);
     });
 
     let rsakey = match getprivatekey(&key) {
         Ok(key_pair) => key_pair,
         Err(e) => {
-            eprintln!("Error loading private key: {}", e);
-            eprintln!("Supported formats: PKCS#8, PEM PKCS#1 (RSA)");
-            panic!("Key loading failed");
+            error!("Error loading private key: {}", e);
+            error!("Supported formats: PKCS#8, PEM PKCS#1 (RSA)");
+            error!("Key loading failed");
+            std::process::exit(1);
         }
     };
-    let givenkey = openssl::pkey::PKey::private_key_from_pkcs8(&key).unwrap();
-    let certkey = openssl::x509::X509::from_der(&certder)
-        .unwrap()
-        .public_key()
-        .unwrap();
-    if !certkey.public_eq(&givenkey) {
-        panic!("Key does not match certificate. Exiting!");
+    let givenkey = match openssl::pkey::PKey::private_key_from_pkcs8(&key) {
+        Ok(a) => a,
+        Err(e) => {
+            error!("Private key loading failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let certkey = openssl::x509::X509::from_der(&certder).map(|p| p.public_key());
+    match certkey {
+        Ok(Ok(certkey)) if certkey.public_eq(&givenkey) => (),
+        _ => {
+            error!("Key does not match certificate. Exiting!");
+            std::process::exit(1);
+        }
     }
     key.zeroize();
     // Get HTTP port
@@ -634,14 +673,16 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
         "postgres" | "postgresql" => config.dbport.or(Some(DEFAULT_POSTGRES_PORT)),
         _ => config.dbport.or(Some(DEFAULT_MYSQL_PORT)),
     };
-
+    let authoritykey = match hex::decode(authoritykey) {
+        Ok(a) => a,
+        Err(e) => {
+            error!("Cannot parse authority key: {e}");
+            std::process::exit(1);
+        }
+    };
     // Create configuration
     let config = Arc::new(Config {
-        issuer_hash: (
-            sha1key.as_ref().to_vec(),
-            hex::decode(authoritykey).unwrap(),
-            isocsp,
-        ),
+        issuer_hash: (sha1key.as_ref().to_vec(), authoritykey, isocsp),
         revocextended: config.revocextended.unwrap_or(false),
         cert: certder,
         time: config.timeout.unwrap_or(DEFAULT_TIMEOUT),
@@ -667,12 +708,17 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     let db = match database::create_database(config.clone()) {
         Ok(db) => {
             if let Err(e) = db.create_tables_if_needed() {
-                eprintln!("Error creating tables: {}", e);
+                error!(
+                    "Error creating tables: {}. Create the table and retry or check permissions.",
+                    e
+                );
+                std::process::exit(1);
             }
             db
         }
         Err(e) => {
-            panic!("Failed to initialize database: {}", e);
+            error!("Failed to initialize database: {}", e);
+            std::process::exit(1);
         }
     };
 
@@ -698,7 +744,7 @@ fn rocket() -> rocket::Rocket<rocket::Build> {
     if cfg!(feature = "api") {
         if config.enable_api {
             info!("API functionality is enabled");
-            if config.api_keys.is_none() || config.api_keys.as_ref().unwrap().is_empty() {
+            if config.api_keys.is_none() || config.api_keys.as_ref().is_none_or(|f| f.is_empty()) {
                 warn!(
                     "API is enabled but no API keys are configured - this is insecure and will lead to failure."
                 );

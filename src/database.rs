@@ -1,26 +1,24 @@
-use crate::r#struct::{
-    CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_SQLITE_TABLE,
-};
-#[cfg(feature="mysql")]
+#[cfg(feature = "postgres")]
+use crate::BoolResult;
+#[cfg(feature = "mysql")]
 use crate::r#struct::DEFAULT_MYSQL_PORT;
-#[cfg(feature="mysql")]
+#[cfg(feature = "mysql")]
 use crate::r#struct::DEFAULT_MYSQL_TABLE;
-#[cfg(feature="postgres")]
+#[cfg(feature = "postgres")]
 use crate::r#struct::DEFAULT_POSTGRES_PORT;
-#[cfg(feature="postgres")]
+#[cfg(feature = "postgres")]
 use crate::r#struct::DEFAULT_POSTGRES_TABLE;
+use crate::r#struct::{CertRecord, CertificateResponse, Certinfo, Config, DEFAULT_SQLITE_TABLE};
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDateTime, Timelike};
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::sql_types;
-use diesel::SqliteConnection;
 #[cfg(feature = "mysql")]
 use diesel::MysqlConnection;
 #[cfg(feature = "postgres")]
 use diesel::PgConnection;
-#[cfg(feature = "postgres")]
-use crate::BoolResult;
+use diesel::SqliteConnection;
+use diesel::prelude::*;
+use diesel::r2d2::{ConnectionManager, Pool};
+use diesel::sql_types;
 use log::{debug, info, warn};
 use ocsp::common::asn1::GeneralizedTime;
 use ocsp::response::{CertStatus as OcspCertStatus, CertStatusCode, CrlReason, RevokedInfo};
@@ -44,7 +42,7 @@ impl DatabaseType {
             _ => DatabaseType::SQLite,
         }
     }
-    #[cfg(any(feature = "mysql",feature="postgres"))]
+    #[cfg(any(feature = "mysql", feature = "postgres"))]
     fn default_port(&self) -> u16 {
         match self {
             DatabaseType::MySQL => DEFAULT_MYSQL_PORT,
@@ -117,7 +115,7 @@ impl DieselDatabase {
             .unwrap_or_else(|| db_type.default_table_name().to_string());
 
         let connection = match db_type {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseType::MySQL => {
                 let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
                 let database_url = match &config.dbip {
@@ -139,7 +137,7 @@ impl DieselDatabase {
 
                 DatabaseConnection::MySQL(pool)
             }
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseType::PostgreSQL => {
                 let dbport = config.dbport.unwrap_or_else(|| db_type.default_port());
                 let database_url = match &config.dbip {
@@ -164,10 +162,10 @@ impl DieselDatabase {
             _ => {
                 let db_path = &config.dbname;
 
-                if let Some(parent) = Path::new(db_path).parent() {
-                    if !parent.exists() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                if let Some(parent) = Path::new(db_path).parent()
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent)?;
                 }
 
                 let database_url = format!("sqlite://{}", db_path);
@@ -188,7 +186,7 @@ impl DieselDatabase {
             table_name,
         })
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     async fn check_cert_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -219,7 +217,7 @@ impl DieselDatabase {
                     Ok(OcspCertStatus::new(
                         CertStatusCode::Revoked,
                         Some(RevokedInfo::new(
-                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap_or_else(|_| unreachable!("This date is always set.")),
                             Some(CrlReason::OcspRevokeCertHold),
                         )),
                     ))
@@ -269,7 +267,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     async fn check_cert_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -301,7 +299,7 @@ impl DieselDatabase {
                     Ok(OcspCertStatus::new(
                         CertStatusCode::Revoked,
                         Some(RevokedInfo::new(
-                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap_or_else(|_| unreachable!("This date is always set.")),
                             Some(CrlReason::OcspRevokeCertHold),
                         )),
                     ))
@@ -383,7 +381,7 @@ impl DieselDatabase {
                     Ok(OcspCertStatus::new(
                         CertStatusCode::Revoked,
                         Some(RevokedInfo::new(
-                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap(),
+                            GeneralizedTime::new(1970, 1, 1, 0, 0, 0).unwrap_or_else(|_| unreachable!("This date is always set.")),
                             Some(CrlReason::OcspRevokeCertHold),
                         )),
                     ))
@@ -433,7 +431,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     fn create_tables_if_needed_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -474,7 +472,7 @@ impl DieselDatabase {
         );
         Ok(())
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     fn create_tables_if_needed_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -604,7 +602,7 @@ impl DieselDatabase {
         );
         Ok(())
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     async fn add_certificate_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -646,7 +644,7 @@ impl DieselDatabase {
         })
         .await?
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     async fn add_certificate_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -727,7 +725,7 @@ impl DieselDatabase {
         })
         .await?
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     async fn revoke_certificate_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -773,7 +771,7 @@ impl DieselDatabase {
             Ok(())
         }).await?
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     async fn revoke_certificate_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -864,7 +862,7 @@ impl DieselDatabase {
             Ok(())
         }).await?
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     async fn get_certificate_status_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -902,7 +900,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     async fn get_certificate_status_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -977,7 +975,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     async fn list_certificates_mysql(
         &self,
         pool: &Pool<ConnectionManager<MysqlConnection>>,
@@ -1026,7 +1024,7 @@ impl DieselDatabase {
 
         Ok(result)
     }
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     async fn list_certificates_postgres(
         &self,
         pool: &Pool<ConnectionManager<PgConnection>>,
@@ -1131,9 +1129,9 @@ impl Database for DieselDatabase {
         revoked: bool,
     ) -> Result<OcspCertStatus, Box<dyn Error + Send + Sync>> {
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => self.check_cert_mysql(pool, certnum, revoked).await,
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.check_cert_postgres(pool, certnum, revoked).await
             }
@@ -1145,9 +1143,9 @@ impl Database for DieselDatabase {
 
     fn create_tables_if_needed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => self.create_tables_if_needed_mysql(pool),
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => self.create_tables_if_needed_postgres(pool),
             DatabaseConnection::SQLite(pool) => self.create_tables_if_needed_sqlite(pool),
         }
@@ -1155,9 +1153,9 @@ impl Database for DieselDatabase {
 
     async fn add_certificate(&self, cert_num: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => self.add_certificate_mysql(pool, cert_num).await,
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.add_certificate_postgres(pool, cert_num).await
             }
@@ -1177,12 +1175,12 @@ impl Database for DieselDatabase {
         }
 
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => {
                 self.revoke_certificate_mysql(pool, cert_num, revocation_time, reason)
                     .await
             }
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.revoke_certificate_postgres(pool, cert_num, revocation_time, reason)
                     .await
@@ -1199,11 +1197,11 @@ impl Database for DieselDatabase {
         cert_num: &str,
     ) -> Result<Certinfo, Box<dyn Error + Send + Sync>> {
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => {
                 self.get_certificate_status_mysql(pool, cert_num).await
             }
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.get_certificate_status_postgres(pool, cert_num).await
             }
@@ -1218,9 +1216,9 @@ impl Database for DieselDatabase {
         status: Option<String>,
     ) -> Result<Vec<CertificateResponse>, Box<dyn Error + Send + Sync>> {
         match &self.connection {
-            #[cfg(feature="mysql")]
+            #[cfg(feature = "mysql")]
             DatabaseConnection::MySQL(pool) => self.list_certificates_mysql(pool, status).await,
-            #[cfg(feature="postgres")]
+            #[cfg(feature = "postgres")]
             DatabaseConnection::PostgreSQL(pool) => {
                 self.list_certificates_postgres(pool, status).await
             }

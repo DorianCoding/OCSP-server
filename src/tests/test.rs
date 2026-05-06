@@ -1,10 +1,11 @@
-use crate::database::DatabaseType;
-use crate::{rocket, DEFAULT_SQLITE_TABLE};
 #[cfg(feature = "mysql")]
 use crate::DEFAULT_MYSQL_TABLE;
 #[cfg(feature = "postgres")]
 use crate::DEFAULT_POSTGRES_TABLE;
+use crate::Database;
+use crate::database::DatabaseType;
 use crate::{Cli, Fileconfig, getprivatekey};
+use crate::{DEFAULT_SQLITE_TABLE, rocket};
 use clap::Parser;
 use config_file::FromConfigFile;
 use mockall::*;
@@ -12,7 +13,6 @@ use ring::{rand, signature};
 use rocket::async_trait;
 use std::{fs, path::Path};
 use zeroize::Zeroize;
-use crate::Database;
 #[test]
 fn testresponse() {
     use ring::rand::SecureRandom;
@@ -53,9 +53,7 @@ fn testresponse() {
     println!("Elapsed time : {:.6} ms", time.elapsed().as_millis());
 }
 #[test]
-#[should_panic(
-    expected = "Error creating KeyPair from PEM."
-)]
+#[should_panic(expected = "Error creating KeyPair from PEM.")]
 fn checkconfigfake() {
     let cli = Cli::parse();
 
@@ -68,7 +66,11 @@ fn checkconfigfake() {
     let mut config = match Fileconfig::from_config_file(config_path) {
         Ok(config) => config,
         Err(e) => {
-            panic!("Error reading config file at {}: {}", config_path.display(), e);
+            panic!(
+                "Error reading config file at {}: {}",
+                config_path.display(),
+                e
+            );
         }
     };
     config.itkey = String::from("test_files/key.pem");
@@ -151,12 +153,12 @@ fn test_database_type_from_string() {
 
 #[test]
 fn test_default_table_names() {
-    #[cfg(feature="mysql")]
+    #[cfg(feature = "mysql")]
     assert_eq!(
         DatabaseType::MySQL.default_table_name(),
         DEFAULT_MYSQL_TABLE
     );
-    #[cfg(feature="postgres")]
+    #[cfg(feature = "postgres")]
     assert_eq!(
         DatabaseType::PostgreSQL.default_table_name(),
         DEFAULT_POSTGRES_TABLE
